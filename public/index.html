@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>ProjectTracker</title>
+<link rel="stylesheet" href="/fonts.css">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<!--
+  The shell. Everything inside #app is rendered by app.js; the three fixed
+  regions below exist in the document so that a slow first fetch shows the frame
+  rather than a white page.
+-->
+<div id="shell" class="shell" hidden>
+  <aside class="rail" id="rail" aria-label="Navigation"></aside>
+  <div class="main">
+    <header class="topbar" id="topbar"></header>
+    <main class="view" id="view" tabindex="-1"></main>
+  </div>
+</div>
+
+<div id="signin" class="signin" hidden>
+  <form class="signin-card" id="signin-form">
+    <div class="signin-brand">PROJECTTRACKER</div>
+    <h1>Sign in</h1>
+    <label>Login<input name="login" autocomplete="username" required autofocus></label>
+    <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+    <p class="signin-error" id="signin-error" role="alert" hidden></p>
+    <button type="submit">SIGN IN</button>
+    <p class="signin-note">The seeded demo account is <b>stephen</b> / <b>projecttracker</b>.</p>
+  </form>
+</div>
+
+<div id="boot" class="boot">
+  <div class="boot-dot"></div>
+  <span>loading</span>
+</div>
+
+<!-- The work package drawer, and the scrim that closes it. -->
+<div class="scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" hidden aria-label="Work package"></aside>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="/lib/dom.js"></script>
+<script src="/lib/api.js"></script>
+<script src="/lib/md.js"></script>
+<script src="/views/shell.js"></script>
+<script src="/views/my.js"></script>
+<script src="/views/portfolio.js"></script>
+<script src="/views/overview.js"></script>
+<script src="/views/work.js"></script>
+<script src="/views/gantt.js"></script>
+<script src="/views/boards.js"></script>
+<script src="/views/backlogs.js"></script>
+<script src="/views/roadmap.js"></script>
+<script src="/views/calendar.js"></script>
+<script src="/views/planner.js"></script>
+<script src="/views/activity.js"></script>
+<script src="/views/wiki.js"></script>
+<script src="/views/meetings.js"></script>
+<script src="/views/connect.js"></script>
+<script src="/views/admin.js"></script>
+<script src="/views/drawer.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
