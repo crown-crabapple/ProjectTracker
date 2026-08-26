@@ -10,14 +10,29 @@ Two runtime dependencies: **MariaDB 10.6+** and **Node 20+**. One npm package,
 ```bash
 cp .env.example .env      # fill in the database details
 npm install
-node db/migrate.js        # create the schema
+node db/migrate.js        # create the schema, and one login that can sign in
 node db/seed.js           # reference data + a worked demo portfolio
 npm start                 # http://127.0.0.1:4180
 ```
 
-Sign in as **stephen** / **projecttracker**. The seeded demo portfolio is the
+With the demo portfolio, sign in as **stephen** / **projecttracker**. It is the
 dataset from the design canvas, carried over row for row so the running app and
 the mockup can be compared side by side.
+
+**To start empty instead**, skip `seed.js` and load the vocabulary only:
+
+```bash
+node db/migrate.js              # prints the password for the `admin` account
+node db/seed.js --reference     # statuses, roles, the work week — required
+npm start
+```
+
+`migrate.js` creates an administrator called `admin` whenever nothing in the
+database can sign in, and generates its password and prints it once. Set
+`PT_ADMIN_PASSWORD` (and `PT_ADMIN_LOGIN`, `PT_ADMIN_NAME`, `PT_ADMIN_EMAIL`)
+beforehand to choose them; `--no-login` skips the account. It never touches an
+account that already exists, so it is safe on every re-run: there is no shipped
+default password anywhere, because that would be a credential in the source tree.
 
 ---
 
@@ -70,11 +85,12 @@ the brief might suggest.
 ## Running it
 
 ```bash
-node db/migrate.js            # apply what is pending
-node db/migrate.js --status   # what would run, and what already has
-node db/migrate.js --force    # drop the database first (asks)
-node db/seed.js               # reference data + demo portfolio
-node db/seed.js --reference   # reference data only — safe on a live database
+node db/migrate.js              # apply what is pending, and ensure a login exists
+node db/migrate.js --status     # what would run, what already has, who can sign in
+node db/migrate.js --force      # drop the database first (asks)
+node db/migrate.js --no-login   # apply migrations and create no login
+node db/seed.js                 # reference data + demo portfolio
+node db/seed.js --reference     # reference data only — safe on a live database
 npm start                     # the web server
 npm test                      # the selftest, against a throwaway database
 node src/cli/tracker.js help  # the command line
@@ -104,8 +120,10 @@ node src/cli/tracker.js export xlsx --project VW
 ```
 
 Every command runs as a real user with real permissions — `--as LOGIN` or
-`PT_CLI_USER` chooses who. There is no ambient superuser, so the CLI cannot do
-something the web app would refuse.
+`PT_CLI_USER` chooses who. With neither, it runs as the single administrator if
+there is exactly one and refuses to guess between several: a migrated *and*
+demo-seeded database has two (`admin` and `stephen`), so name one. There is no
+ambient superuser, so the CLI cannot do something the web app would refuse.
 
 ## The MCP server
 

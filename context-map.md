@@ -24,7 +24,9 @@ model.
   every non-obvious column. The base; applied only to an empty schema.
 - `db/migrations/NNNN_*.sql` — changes after that. Empty today.
 - `db/migrate.js` — creates the database, applies the base then the migrations,
-  records what ran in `schema_migrations`.
+  records what ran in `schema_migrations`, and leaves **one account that can sign
+  in** so the demo portfolio is optional. It only ever adds that account when
+  nothing in the database can sign in.
 - `db/seed-reference.js` — the vocabulary the app cannot run without: statuses
   and their **progress weights**, priorities, work package types, roles,
   permissions, the work week, the theme, the form configurations, help texts.

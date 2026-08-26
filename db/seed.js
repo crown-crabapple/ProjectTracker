@@ -597,6 +597,16 @@ async function main() {
       console.log(`seeded ${counts.projects} projects · ${counts.work_packages} work packages · `
         + `${counts.users} users · ${counts.documents} documents · ${counts.activities} activity entries`);
       console.log('sign in as stephen / projecttracker');
+      // Migrate leaves an `admin` account behind, so after seeding the demo there
+      // are usually two administrators. The CLI refuses to guess between them,
+      // and finding that out from a failed command is worse than reading it here.
+      const admins = await db.query(
+        "SELECT login FROM users WHERE is_admin = 1 AND active = 1 AND kind = 'user' ORDER BY id"
+      );
+      if (admins.length > 1) {
+        console.log(`${admins.length} administrators exist (${admins.map((a) => a.login).join(', ')}), `
+          + 'so the CLI needs --as LOGIN or PT_CLI_USER');
+      }
     }
   }
   await db.close();
