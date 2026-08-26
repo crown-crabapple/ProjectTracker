@@ -91,6 +91,7 @@ node db/migrate.js --force      # drop the database first (asks)
 node db/migrate.js --no-login   # apply migrations and create no login
 node db/seed.js                 # reference data + demo portfolio
 node db/seed.js --reference     # reference data only — safe on a live database
+node db/import-state.js FILE    # import a SeedFall tracker state file (--dry-run first)
 npm start                     # the web server
 npm test                      # the selftest, against a throwaway database
 node src/cli/tracker.js help  # the command line
@@ -144,6 +145,32 @@ Five properties, each of which is the answer to a question somebody will ask:
 - **A write runs as the person who issued the token** and can do no more than
   they can, calling the same mutation functions the web app calls — and the
   activity trail records the machine rather than them. `docs/decisions/0006`.
+
+## Importing a tracker state file
+
+```bash
+node db/import-state.js state.json --project SF --as stephen --dry-run
+node db/import-state.js state.json --project SF --as stephen
+```
+
+The SeedFall tracker keeps its state as one JSON document: a feature ledger, a
+decision log, the answers to the questions it asked, and a rolling activity
+trail. Its status vocabulary is this app's, so a feature imports as itself.
+
+Features become work packages, questions become comments on the feature they
+name, decisions become one wiki page each with their state as the page's status,
+and the trail imports with its original timestamps and its original actor labels
+— `claude` and `browser` are not accounts here, and stay labels.
+
+It **merges**. Run it again with a newer file and it moves the statuses that
+changed, appends the trail entries it has not seen, and writes the new decisions.
+It never deletes: a feature that has left the file keeps its work package, and
+the summary counts them rather than tidying them away.
+
+The last thing it prints is the check that matters — the tracker's completion
+counts beside the file's. If they disagree it says so and exits non-zero, because
+an imported figure that is wrong by a little is worse than one that is missing.
+`docs/decisions/0007` has the two decisions behind the mapping.
 
 ## Testing
 
