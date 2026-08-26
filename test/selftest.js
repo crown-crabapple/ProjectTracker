@@ -297,6 +297,31 @@ async function databaseChecks(db) {
   ));
   check('the schema has the tables it should', tables > 80, `${tables} tables`);
 
+  // --- the default login. migrate leaves exactly one account that can sign in,
+  // which is what makes the demo portfolio optional rather than the only door in.
+  const pw = require('../src/domain/passwords');
+  check('migrate.js creates a default login', /created the default login admin/.test(migrated.out),
+    migrated.out);
+  const admin = await db.one(
+    "SELECT login, name, kind, active, is_admin, password_hash, password_salt FROM users WHERE login = 'admin'"
+  );
+  check('and it is an administrator that signIn would accept',
+    admin && admin.kind === 'user' && Number(admin.active) === 1 && Number(admin.is_admin) === 1,
+    JSON.stringify(admin));
+  const printed = /shown once[^\n]*\n\s*(\S+)/.exec(migrated.out);
+  check('and it prints the generated password once', Boolean(printed), migrated.out);
+  check('and the password it printed is the password it stored',
+    Boolean(printed) && pw.verify(printed[1], admin.password_hash, admin.password_salt),
+    'printing one string and hashing another is the way this fails silently');
+
+  // A second run must not mint a second account, and must not act on a changed
+  // PT_ADMIN_LOGIN either: the trigger is "nothing can sign in", not "this name
+  // is missing".
+  const reMigrated = await run(process.execPath, ['db/migrate.js'], { PT_ADMIN_LOGIN: 'owner' });
+  eq('migrating again creates no second login',
+    Number(await db.scalar('SELECT COUNT(*) FROM users')), 1);
+  check('and says nothing about a login', !/login/.test(reMigrated.out), reMigrated.out);
+
   const seeded = await run(process.execPath, ['db/seed.js']);
   check('seed.js loads reference data and the demo portfolio',
     seeded.code === 0 && /seeded \d+ projects/.test(seeded.out), seeded.err || seeded.out);
@@ -591,15 +616,25 @@ async function databaseChecks(db) {
   // --- the HTTP server, end to end
   await httpChecks({ livingToken });
 
-  // --- the CLI runs against the same rollup
-  const cli = await run(process.execPath, ['src/cli/tracker.js', 'report'], { NO_COLOR: '1' });
+  // --- the CLI runs against the same rollup.
+  // The actor is named rather than inferred: this database has two
+  // administrators — migrate's default login and the demo's stephen — so the
+  // CLI's "the single administrator" fallback does not apply, which is itself
+  // the last check in this block.
+  const asStephen = { NO_COLOR: '1', PT_CLI_USER: 'stephen' };
+  const cli = await run(process.execPath, ['src/cli/tracker.js', 'report'], asStephen);
   check('the CLI reports', cli.code === 0 && /weighted readiness/.test(cli.out), cli.err || cli.out);
-  const cliShow = await run(process.execPath, ['src/cli/tracker.js', 'show', 'WP-112'], { NO_COLOR: '1' });
+  const cliShow = await run(process.execPath, ['src/cli/tracker.js', 'show', 'WP-112'], asStephen);
   check('the CLI shows one work package', cliShow.code === 0 && /Weighted domain rollup/.test(cliShow.out),
     cliShow.err);
   check('and names the basis of its progress figure', /basis: hours/.test(cliShow.out));
-  const cliBad = await run(process.execPath, ['src/cli/tracker.js', 'show', 'nonsense'], { NO_COLOR: '1' });
+  const cliBad = await run(process.execPath, ['src/cli/tracker.js', 'show', 'nonsense'], asStephen);
   check('the CLI refuses a malformed key', cliBad.code !== 0 && /not a work package key/.test(cliBad.err));
+  const cliAmbiguous = await run(process.execPath, ['src/cli/tracker.js', 'report'], { NO_COLOR: '1' });
+  check('the CLI refuses to guess between two administrators',
+    cliAmbiguous.code !== 0 && /ambiguous/.test(cliAmbiguous.err)
+      && /admin/.test(cliAmbiguous.err) && /stephen/.test(cliAmbiguous.err),
+    cliAmbiguous.err || cliAmbiguous.out);
 }
 
 function mcpExchange(secret, messages) {

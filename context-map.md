@@ -24,7 +24,9 @@ model.
   every non-obvious column. The base; applied only to an empty schema.
 - `db/migrations/NNNN_*.sql` — changes after that. Empty today.
 - `db/migrate.js` — creates the database, applies the base then the migrations,
-  records what ran in `schema_migrations`.
+  records what ran in `schema_migrations`, and leaves **one account that can sign
+  in** so the demo portfolio is optional. It only ever adds that account when
+  nothing in the database can sign in.
 - `db/seed-reference.js` — the vocabulary the app cannot run without: statuses
   and their **progress weights**, priorities, work package types, roles,
   permissions, the work week, the theme, the form configurations, help texts.
@@ -75,6 +77,10 @@ model.
 - `public/index.html` — the shell and the script order.
 - `public/app.css` — the token set and the class vocabulary. **The colour rule is
   at the top and is load-bearing: rust is reserved.**
+- `public/fonts.css` + `public/fonts/` — Instrument Sans for prose, Archivo for
+  every label and numeral, both vendored as subset variable woff2 and served from
+  this origin because `font-src` is `'self'`. The header carries the subsetting
+  command and the licence.
 - `public/app.js` — state, routing (**the URL is the state**), the render loop.
 - `public/lib/dom.js` — `h()`. No `innerHTML` anywhere, which is why a work
   package subject containing a script tag is text in all sixteen views.

@@ -47,6 +47,7 @@ const MIME = {
   '.png': 'image/png',
   '.ico': 'image/x-icon',
   '.woff2': 'font/woff2',
+  '.txt': 'text/plain; charset=utf-8',   // the fonts' OFL licence sits beside them
   '.map': 'application/json; charset=utf-8',
 };
 
