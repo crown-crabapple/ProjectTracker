@@ -1,0 +1,218 @@
+# CLAUDE.md — working agreement for ProjectTracker
+
+A portfolio and project tracker over MariaDB, built to the shape of the tracker
+in the SeedFall repository and to the design canvas attached to the brief.
+
+Read `README.md` first, then `context-map.md`. This file is the rules.
+
+---
+
+## 0. Read first, every session
+
+1. This file.
+2. `context-map.md` — where everything lives, and which layer owns what. Check it
+   before searching blind.
+3. `docs/decisions/` — the five decisions that would otherwise be re-derived.
+   `0002` (the progress model) is the one that touches the most code.
+4. `docs/features.md` — the brief's feature list mapped to code, with every gap
+   named. **Read this before claiming something works.**
+
+---
+
+## 1. The rules that are load-bearing
+
+These exist because breaking one makes the product lie, which is worse than
+making it fail.
+
+### A percentage is computed in exactly one place
+
+`src/domain/rollup.js`. The web app, the CLI and the MCP server all call it.
+Anything that computes its own percentage is a second progress model, and the two
+will disagree in front of somebody who has to decide which to believe.
+
+### Weighted readiness is not completion
+
+Readiness is a weighted sum. Completion is three separate counts. They are always
+shown together and never folded into one number. The SeedFall tracker added
+*done* and *in build* together and called the total "built", which reported a
+milestone as 49/49 with four features unfinished.
+
+### Excluded is not zero
+
+A status with a NULL progress weight leaves the denominator. Scoring it zero
+makes the figure gameable in both directions. When you write about it, say the
+word "excluded" — a blank cell and a `0` look similar in a table and mean
+opposite things.
+
+### A parent never counts its children
+
+Story points and estimates are summed over leaf work only. Otherwise velocity
+drifts upward the more structure a project grows.
+
+### Rust is reserved
+
+`--blocked` is for things that need a decision. Nothing decorative may use it, so
+a rust pixel anywhere in the product means something is waiting on a person. If
+you need a fourth colour for something that is merely late, use amber.
+
+### The URL is the state
+
+Route, project, filter text, board mode, wiki document, open drawer — all in the
+hash. Nothing that a person might want to come back to is held in a variable the
+URL does not also carry. That is what makes a filtered list shareable, the back
+button work through a drawer, and a bug reproducible from a screenshot.
+
+### No `innerHTML`
+
+`public/lib/dom.js` sets text through `textContent` and attributes through
+`setAttribute`. There is no HTML-string path, which is why a work package subject
+containing a script tag is text in all sixteen views without anybody having to
+remember to escape it. The markdown renderer builds nodes for the same reason.
+
+### An unknown filter throws
+
+`src/domain/query.js` refuses a filter key that is not in `FILTERS`. Silently
+ignoring one returns more than the caller asked for, and on a shared link that is
+a disclosure.
+
+### Internal comments are filtered in the SQL
+
+Not in a wrapper, not in the renderer. A UI filter is a filter an API call goes
+around. Every read path — the drawer, the share, every MCP tool — excludes them
+in the query.
+
+### No credential in the database
+
+A repository or integration records the **name** of the environment variable its
+token is read from. A database dump carries no secret. Do not add a column that
+holds one.
+
+### The activity trail is written in the same transaction as the change
+
+A change with no trail is a change nobody can explain. An automation and the MCP
+write tool go through the same function with `actorLabel` instead of `actorId`,
+so an automated change is never indistinguishable from a human one.
+
+### Automations fire after the commit, never inside it
+
+One that ran inside would see uncommitted state; one that failed would roll back
+the change that triggered it. And an automation never triggers an automation —
+`dispatch` takes a depth and refuses to recurse.
+
+---
+
+## 2. Safety rules
+
+- **Never delete without asking.** That includes rows: a revoked share, a
+  rejected email, a superseded summary and a skipped automation run all keep
+  their row on purpose.
+- **`npm test` runs against a throwaway database.** Keep it that way. The
+  connection pool is repointed before the first query, and the last check
+  fingerprints the configured schema before and after. If you add a check that
+  needs the real database, you have added the bug this suite was written to
+  prevent.
+- **`db/schema.sql` is the base, not the current shape.** Once a database exists,
+  changes are numbered files in `db/migrations/`.
+- **No secret in a file.** Read from the environment. `.env` is gitignored.
+- **Do not commit or push unless asked.**
+
+---
+
+## 3. Writing
+
+**Comments carry derivations, not descriptions.** A comment that says what the
+line does is noise; a comment that says why the number is 0.35, or why this is a
+copy rather than a reference, is the most valuable thing in the file. Every
+non-obvious column in `db/schema.sql` has one.
+
+**Say what is thin.** `docs/features.md` uses three words precisely — done,
+partial, modelled — and names every gap. A feature list that reads
+"implemented" against everything is a feature list nobody can plan from.
+
+**In the product, prefer the sentence to the label.** `EXCLUDED FROM THE
+DENOMINATOR` beats a blank cell. `BASIS: BOOKED AGAINST ESTIMATE` beats a bare
+percentage. `@nobody matched anybody` beats silence.
+
+**En-GB in code, comments and content.** US English in conversation.
+
+No puffery — "robust", "seamless", "comprehensive". No significance inflation.
+No three-part lists for rhythm.
+
+**Reply shape for any non-trivial change:**
+
+```
+What I did       — the change, in a sentence or two.
+Why this way     — only if there was a real choice.
+Verified         — what was actually run, with the output.
+Found along the way — unrelated problems spotted, not fixed.
+Open questions   — what you need to keep going.
+```
+
+---
+
+## 4. Code conventions
+
+- **Match the file you are in.** Existing patterns beat preferences.
+- **One runtime dependency.** `mysql2`. Adding a second needs the argument in
+  `docs/decisions/0001` answered — say what it replaces and why forty lines will
+  not do.
+- **Every identifier reaching SQL goes through `db.ident()`**, which throws on
+  anything outside `[A-Za-z0-9_]` rather than escaping it. There is no legitimate
+  column in this schema that needs escaping; a name that does came from a request
+  body.
+- **Every value is a placeholder.** No SQL string is built by concatenating one.
+- **A new column lands with its writer, its reader, its validation and a check.**
+  A column that is parsed and ignored is a column that lies to whoever fills it.
+- **Errors name the thing.** `you do not have "sign_gate" on this project`, not
+  `forbidden`. A refusal with no reason is a refusal somebody works around.
+- **A bug fix gets a check named after the mistake.** The suite already has
+  several: *a row carries its raw foreign keys as well as its labels* exists
+  because a missing `status_id` made every status transition fail; *the Gantt
+  survives a work package with no dates* exists because it once returned a 500
+  for the whole chart.
+- **No literal control characters in source.** Build them from `String.fromCharCode`
+  or a `\uXXXX` escape. The CLI's colour codes do this and say why.
+
+---
+
+## 5. Commands
+
+```bash
+node db/migrate.js [--status|--force]   # schema
+node db/seed.js [--reference]           # reference data, and the demo portfolio
+npm start                               # the web server
+npm test                                # 200 checks, throwaway database
+node src/cli/tracker.js help
+node src/mcp/server.js                  # stdio
+```
+
+**Definition of done for a change:**
+
+1. `npm test` is green.
+2. If it touched a screen, it has been opened in a browser — no console errors,
+   and no horizontal overflow at 390px.
+3. If it touched a number, `docs/decisions/0002` still describes what the code
+   does.
+4. If it touched a feature the brief names, `docs/features.md` still describes it
+   accurately, including the word done / partial / modelled.
+
+---
+
+## 6. What is deliberately not here
+
+Named so nobody builds them thinking they were forgotten:
+
+- **Real-time push.** Notifications are correct and immediate in the database;
+  delivery waits for the next request. SSE is a small change and is not
+  pretended to be there.
+- **Outbound integration clients.** Nothing polls GitHub, GitLab, git, SVN,
+  XWiki or IMAP. The tables, the display and the inbound endpoints are real.
+- **Character-level collaborative editing.** Presence plus a refusal to merge —
+  `docs/decisions/0004` has the argument, and it is the most likely thing to
+  clear the dependency bar later.
+- **A designed PDF.** The PDF export is a plain paginated listing and says so in
+  its own footer. Making it look designed needs a layout engine.
+- **Editors for configuration currently edited as data.** Themes, automations,
+  form layouts, saved views, meetings, news and forum posts are stored, validated
+  and displayed, and created by insert. The model and the read surface are the
+  parts that are expensive to get wrong, and they are the parts that are done.

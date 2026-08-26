@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Shared — ProjectTracker</title>
+<link rel="stylesheet" href="/fonts.css">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<!--
+  The share page. Deliberately separate from the app shell: whoever opens a share
+  link has no account, and showing them a sign-in card is the whole point of a
+  share link failing. This page never calls /api/session and never sets a cookie.
+-->
+<div class="main" style="min-height:100vh">
+  <header class="topbar">
+    <div class="crumb" id="crumb">SHARED BY LINK</div>
+    <div class="spacer"></div>
+    <div class="chip" id="expiry"></div>
+  </header>
+  <main class="view" id="view"></main>
+</div>
+<script src="/lib/dom.js"></script>
+<script src="/lib/api.js"></script>
+<script src="/share.js"></script>
+</body>
+</html>

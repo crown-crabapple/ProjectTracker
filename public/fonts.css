@@ -1,0 +1,36 @@
+/*
+ * Typography.
+ *
+ * The design names Instrument Sans for prose and Archivo for every label and
+ * numeral. Neither is loaded from a CDN: the server sends a strict
+ * Content-Security-Policy with no external origins, and an app that reaches out
+ * to a font host to render is an app that renders differently when that host is
+ * down.
+ *
+ * So the stack degrades to the platform's own faces, in the same roles. If the
+ * two families are wanted, drop the woff2 files into public/fonts/ and the
+ * @font-face rules below pick them up — the src list is ordered so a missing
+ * file falls through silently rather than blocking the first paint.
+ */
+
+@font-face {
+  font-family: 'Instrument Sans';
+  src: url('/fonts/InstrumentSans-Variable.woff2') format('woff2-variations');
+  font-weight: 400 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Archivo';
+  src: url('/fonts/Archivo-Variable.woff2') format('woff2-variations');
+  font-weight: 400 700;
+  font-display: swap;
+}
+
+:root {
+  /* The prose face. -apple-system and Segoe UI are the closest platform
+     equivalents in proportion; Instrument Sans wins when it is present. */
+  --font-prose: 'Instrument Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  /* Every label, every number. Tabular figures are the whole point: a column of
+     right-aligned hours that jitters as the digits change is unreadable. */
+  --font-label: 'Archivo', 'SF Mono', 'Cascadia Mono', 'Roboto Mono', ui-monospace, monospace;
+}
