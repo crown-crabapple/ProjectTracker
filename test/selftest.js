@@ -23,6 +23,7 @@
 'use strict';
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
@@ -578,6 +579,127 @@ async function databaseChecks(db) {
   await auth.signOut(session.token);
   eq('signing out invalidates it',
     await auth.currentUser({ headers: { cookie: `pt_session=${session.token}` } }), null);
+
+  // --- importing a tracker state file
+  //
+  // A fixture rather than the real 557KB file: a check that needs half a
+  // megabyte of somebody else's project committed beside it is a check that gets
+  // deleted the first time the file moves.
+  const importer = require('../db/import-state');
+  const importDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pt-import-'));
+  const stateFile = path.join(importDir, 'fixture-state.json');
+  const fixture = {
+    schemaVersion: 1,
+    project: 'Fixture',
+    updated: '2026-08-20T00:00:00.000Z',
+    build: { label: 'two of four', note: 'the fixture build' },
+    features: {
+      'F-AA-001': { status: 'done', updated: '2026-08-01T00:00:00.000Z', note: 'finished' },
+      'F-AA-002': { status: 'speccing', updated: '2026-08-02T00:00:00.000Z' },
+      'F-BB-001': { status: 'deferred', updated: '2026-08-03T00:00:00.000Z' },
+      'F-BB-002': { status: 'in_build', updated: '2026-08-04T00:00:00.000Z' },
+    },
+    decisions: {
+      D1: { state: 'settled', answer: 'Do the first thing. It was cheaper.', updated: '2026-08-05T00:00:00.000Z' },
+      D2: { state: 'open', note: 'Nobody has decided this yet.', updated: '2026-08-06T00:00:00.000Z' },
+    },
+    questions: {
+      'Q-F-AA-001-abc': { state: 'answered', answer: 'Three is enough.', updated: '2026-08-07T00:00:00.000Z' },
+      'Q-F-ZZ-999-def': { state: 'answered', answer: 'About a feature that is not here.', updated: '2026-08-08T00:00:00.000Z' },
+    },
+    activity: [
+      { ts: '2026-08-04T00:00:00.000Z', kind: 'feature', id: 'F-BB-002', from: 'speccing', to: 'in_build', note: 'picked up', by: 'claude' },
+    ],
+  };
+  fs.writeFileSync(stateFile, JSON.stringify(fixture));
+
+  await throws('an import refuses to guess between two administrators',
+    () => importer.runImport({ file: stateFile, code: 'ZZ' }), 'administrators exist');
+
+  const dry = await importer.runImport({ file: stateFile, code: 'ZZ', asLogin: 'stephen', dryRun: true });
+  eq('a dry run reports what it would do', dry.report.features.created, 4);
+  eq('and writes nothing', Number(await db.scalar("SELECT COUNT(*) FROM projects WHERE code = 'ZZ'")), 0);
+
+  const imported1 = await importer.runImport({ file: stateFile, code: 'ZZ', asLogin: 'stephen' });
+  eq('an import creates one work package per feature', imported1.report.features.created, 4);
+  const zz = await db.scalar("SELECT id FROM projects WHERE code = 'ZZ'");
+  const zzRows = await db.query(`
+    SELECT wp.subject, s.code AS status FROM work_packages wp JOIN statuses s ON s.id = wp.status_id
+     WHERE wp.project_id = ? ORDER BY wp.subject`, [zz]);
+  eq('with the statuses the file gave them',
+    zzRows.map((r) => `${r.subject}:${r.status}`),
+    ['F-AA-001:done', 'F-AA-002:speccing', 'F-BB-001:deferred', 'F-BB-002:in_build']);
+  // The check the whole script exists for: the tracker's counts are the file's.
+  const agrees = await importer.verify(importer.readState(stateFile), zz);
+  check('and the tracker\'s completion counts reproduce the file\'s', agrees.same,
+    JSON.stringify({ db: agrees.fromDb, file: agrees.fromFile }));
+  eq('no feature is given a parent, so nothing is invented into the denominator',
+    Number(await db.scalar('SELECT COUNT(*) FROM work_packages WHERE project_id = ? AND parent_id IS NOT NULL', [zz])),
+    0);
+
+  eq('an answered question becomes a comment on the feature it names',
+    Number(await db.scalar(`
+      SELECT COUNT(*) FROM comments c JOIN work_packages wp ON wp.id = c.container_id
+       WHERE c.container_type = 'work_package' AND wp.project_id = ? AND wp.subject = 'F-AA-001'`, [zz])),
+    1);
+  eq('and a question naming a feature the file does not carry is reported, not dropped silently',
+    imported1.report.questions.orphans, ['Q-F-ZZ-999-def']);
+
+  const decisionPage = await db.one(
+    "SELECT number, title, status FROM documents WHERE project_id = ? AND slug = 'd2'", [zz]
+  );
+  eq('a decision becomes a wiki page carrying its state', decisionPage.status, 'OPEN');
+  const zzProject = await db.one('SELECT health, health_note FROM projects WHERE id = ?', [zz]);
+  check('and an unsettled decision makes the project rust, which is what rust is for',
+    zzProject.health === 'rust' && /D2/.test(zzProject.health_note), JSON.stringify(zzProject));
+
+  eq('a feature imported as done carries the date it closed',
+    String(await db.scalar(`
+      SELECT closed_at FROM work_packages WHERE project_id = ? AND subject = 'F-AA-001'`, [zz])).slice(0, 10),
+    '2026-08-01');
+
+  // Health is recorded, not derived: the import maintains the note it wrote and
+  // leaves a person's alone.
+  await db.update('projects', zz, { health: 'amber', health_note: 'Watched by hand' });
+  const afterHand = await importer.runImport({ file: stateFile, code: 'ZZ', asLogin: 'stephen' });
+  const stillHand = await db.one('SELECT health, health_note FROM projects WHERE id = ?', [zz]);
+  check('an import does not overwrite a health note somebody wrote',
+    stillHand.health === 'amber' && stillHand.health_note === 'Watched by hand'
+      && afterHand.report.healthLeftAlone === 'Watched by hand',
+    JSON.stringify(stillHand));
+  await db.update('projects', zz, { health_note: '1 decision(s) waiting on a person: D2' });
+  await importer.runImport({ file: stateFile, code: 'ZZ', asLogin: 'stephen' });
+  eq('and takes its own note back over when it is the one standing there',
+    (await db.scalar('SELECT health FROM projects WHERE id = ?', [zz])), 'rust');
+
+  const imported = await db.one(
+    "SELECT actor_id, actor_label FROM activities WHERE project_id = ? AND target_label = 'F-BB-002'", [zz]
+  );
+  check('the imported trail keeps the source actor as a label, not as a person here',
+    imported && imported.actor_id === null && imported.actor_label === 'claude',
+    JSON.stringify(imported));
+
+  const again = await importer.runImport({ file: stateFile, code: 'ZZ', asLogin: 'stephen' });
+  eq('a second import of the same file changes nothing', again.report.features.created, 0);
+  eq('and adds no duplicate activity', again.report.activity.created, 0);
+  eq('and no duplicate comment', again.report.questions.created, 0);
+
+  fixture.features['F-AA-002'].status = 'done';
+  delete fixture.features['F-BB-001'];
+  fs.writeFileSync(stateFile, JSON.stringify(fixture));
+  const merged = await importer.runImport({ file: stateFile, code: 'ZZ', asLogin: 'stephen' });
+  eq('a later file moves the status it changed', merged.report.features.statusChanged,
+    ['F-AA-002 SPECCING → DONE']);
+  eq('and never deletes what has left the file', merged.report.features.notInFile, 1);
+  eq('the work package it stopped carrying is still there',
+    Number(await db.scalar("SELECT COUNT(*) FROM work_packages WHERE project_id = ? AND subject = 'F-BB-001'", [zz])),
+    1);
+
+  fixture.features['F-AA-001'].status = 'invented';
+  fs.writeFileSync(stateFile, JSON.stringify(fixture));
+  await throws('a status this database does not have stops the import and names it',
+    () => importer.runImport({ file: stateFile, code: 'ZZ', asLogin: 'stephen' }), '"invented"');
+  fs.rmSync(importDir, { recursive: true, force: true });
 
   // --- the MCP surface
   const mcpRead = await mut2.issueMcpToken(ctx, { name: 'selftest read', scope: 'read' });

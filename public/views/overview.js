@@ -75,6 +75,14 @@
         h('span.panel-note', { text: 'A GATE MUST BE RECORDED BEFORE THE NEXT PHASE OPENS' }),
       ]),
       h('div.panel-body', [
+        // A project with no phases is a real state — one created without a
+        // template, or imported from a tracker that had none — and an empty
+        // panel under a heading about gates reads as something that failed to
+        // load. Say which it is.
+        data.lifecycle.phases.length ? null : h('p.note', {
+          text: 'No phases recorded for this project, so there is no gate to sign. '
+            + 'A project created from a template brings its phases with it.',
+        }),
         h('div.phases', {
           style: { 'grid-template-columns': `repeat(${Math.min(6, data.lifecycle.phases.length || 1)}, 1fr)` },
         }, data.lifecycle.phases.map((ph) => {

@@ -35,6 +35,10 @@ model.
   Upserted, so re-running it after an upgrade is how a new status arrives.
 - `db/demo-data.js` — the design canvas's dataset, as data.
 - `db/seed.js` — loads both. Refuses to seed a portfolio twice.
+- `db/import-state.js` — merges a SeedFall tracker state file into a project:
+  features to work packages, decisions to wiki pages, questions to comments, the
+  trail with its own timestamps. Merges rather than replaces, deletes nothing,
+  and finishes by checking its counts against the file's. `docs/decisions/0007`.
 
 ### Rules
 - `src/domain/rollup.js` — **weighted readiness, completion as three counts,

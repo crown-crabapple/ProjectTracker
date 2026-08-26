@@ -190,6 +190,7 @@ Open questions   — what you need to keep going.
 ```bash
 node db/migrate.js [--status|--force]   # schema
 node db/seed.js [--reference]           # reference data, and the demo portfolio
+node db/import-state.js FILE [--dry-run]  # merge a SeedFall tracker state file
 npm start                               # the web server
 npm test                                # 200 checks, throwaway database
 node src/cli/tracker.js help
