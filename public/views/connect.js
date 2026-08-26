@@ -194,7 +194,13 @@
       h('div.panel-head', [
         h('h2', { text: 'Tools exposed' }),
         h('div.spacer'),
-        h('span.panel-note', { text: `${mcp.tools.filter((t) => t.status === 'done').length} OF ${mcp.tools.length} IMPLEMENTED` }),
+        // Two counts, not one total. Adding done and in build together and
+        // calling the sum "implemented" is the arithmetic this whole tracker
+        // exists to avoid making.
+        h('span.panel-note', {
+          text: `${mcp.tools.filter((t) => t.status === 'done').length} DONE · `
+            + `${mcp.tools.filter((t) => t.status === 'in_build').length} IN BUILD`,
+        }),
       ]),
       h('div.panel-body.tight', [
         h('div.rows', mcp.tools.map((t) => h('div', { style: { padding: '9px 0' } }, [
@@ -216,8 +222,10 @@
           h('div', { style: { 'font-size': '11px', color: 'var(--ink-5)', 'margin-top': '2px' }, text: t.detail || '' }),
         ]))),
         h('p.note', {
-          text: 'The one write tool puts a generated summary on My page, and it needs a write-scoped '
-            + 'token of its own. Every call — read or write — lands in the audit below.',
+          text: `${mcp.tools.filter((t) => t.mode === 'write').length} of these write, and a read-scoped `
+            + 'token is not offered them at all. A write runs with the permissions of the person who '
+            + 'issued the token and can do no more than they can, and the activity trail records it as '
+            + 'this server rather than as them. Every call — read or write — lands in the audit below.',
         }),
       ]),
     ]);

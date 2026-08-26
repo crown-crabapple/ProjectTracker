@@ -35,7 +35,13 @@ async function record(entry, tx = db) {
   const id = await tx.insert('activities', {
     project_id: projectId,
     work_package_id: workPackageId,
-    actor_id: actorId,
+    // A labelled actor is a machine, and the label replaces the id rather than
+    // sitting beside it. The MCP write tools borrow the authority of the person
+    // who issued the token; recording that person as the actor would make an
+    // automated change indistinguishable from a human one, which is the one
+    // thing this table exists to prevent. Enforced here rather than at each
+    // call site, because a call site that forgets is a call site that lies.
+    actor_id: actorLabel ? null : actorId,
     actor_label: actorLabel,
     kind,
     verb,
@@ -52,11 +58,15 @@ async function notify({ userId, kind, title, detail = null, actorId = null, acto
   projectId = null, workPackageId = null }, tx = db) {
   if (!userId) return null;
   // Never notify somebody about their own action. It is noise, and it trains
-  // people to stop reading the inbox.
-  if (actorId && Number(actorId) === Number(userId)) return null;
+  // people to stop reading the inbox. A machine's action is not their own
+  // action, even when it ran on their token, so the suppression does not apply
+  // to a labelled actor — being told what the assistant did on your behalf is
+  // the point.
+  if (!actorLabel && actorId && Number(actorId) === Number(userId)) return null;
   return tx.insert('notifications', {
     user_id: userId, kind, title, detail,
-    actor_id: actorId, actor_label: actorLabel,
+    // Same rule as the activity trail: the label replaces the id.
+    actor_id: actorLabel ? null : actorId, actor_label: actorLabel,
     project_id: projectId, work_package_id: workPackageId,
   });
 }

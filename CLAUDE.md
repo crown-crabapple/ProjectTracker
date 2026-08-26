@@ -90,8 +90,18 @@ holds one.
 ### The activity trail is written in the same transaction as the change
 
 A change with no trail is a change nobody can explain. An automation and the MCP
-write tool go through the same function with `actorLabel` instead of `actorId`,
-so an automated change is never indistinguishable from a human one.
+write tools go through the same function with `actorLabel` instead of `actorId`,
+so an automated change is never indistinguishable from a human one. *Instead of*
+is enforced in `notify.record`, not at the call sites: a label always nulls the
+id, because a call site that forgets is a call site that lies.
+
+### An MCP write runs as the person who issued the token
+
+A token is not a person and every permission here is answered per person, so a
+write borrows its issuer's authority and can do no more than they can — and
+calls the same functions in `src/api/mutations*.js` that the web app calls, so
+the status workflow and the rest are not reimplemented behind them.
+`docs/decisions/0006`.
 
 ### Automations fire after the commit, never inside it
 

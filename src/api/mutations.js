@@ -45,6 +45,29 @@ const today = () => new Date().toISOString().slice(0, 10);
 const TOKEN_ALPHABET = /^[A-Za-z0-9]+$/;
 const newToken = (prefix = '') => prefix + crypto.randomBytes(24).toString('hex').slice(0, 45);
 
+/**
+ * Nobody to leave out of the audience.
+ *
+ * A person is not told about their own change. A change a machine made on their
+ * token is not their own change, so when there is a label there is nobody to
+ * exclude: being told what the assistant did is the point.
+ */
+const excluding = (ctx) => (ctx.actorLabel ? null : ctx.user.id);
+
+/**
+ * Who to record as having done this.
+ *
+ * A machine caller sets `ctx.actorLabel`. The MCP write tools borrow the
+ * authority of the person who issued the token — that is where the permission
+ * check gets its answer — but the trail has to name the machine INSTEAD OF that
+ * person, or an automated change is indistinguishable from a human one.
+ *
+ * `notify.record` performs the substitution; this spreads both halves so a call
+ * site cannot pass one and forget the other. Every activity and notification on
+ * a path a machine can reach goes through it.
+ */
+const actor = (ctx) => ({ actorId: ctx.user.id, actorLabel: ctx.actorLabel || null });
+
 // ------------------------------------------------------------- work packages
 
 const EDITABLE = new Set([
@@ -127,22 +150,22 @@ async function updateWorkPackage(ctx, id, patch) {
     await tx.update('work_packages', id, changes);
     if (statusChange) {
       await notify.record({
-        projectId: wp.project_id, workPackageId: id, actorId: ctx.user.id,
+        projectId: wp.project_id, workPackageId: id, ...actor(ctx),
         kind: 'status', verb: 'set status', targetLabel: wp.wp_key,
         detail: `${wp.subject} — ${statusChange.from} to ${statusChange.to}`,
         from: statusChange.from, to: statusChange.to,
       }, tx);
     } else {
       await notify.record({
-        projectId: wp.project_id, workPackageId: id, actorId: ctx.user.id,
+        projectId: wp.project_id, workPackageId: id, ...actor(ctx),
         kind: 'status', verb: 'edited', targetLabel: wp.wp_key,
         detail: Object.keys(changes).join(', '),
       }, tx);
     }
-    const audience = await notify.audienceFor(id, { exclude: ctx.user.id }, tx);
+    const audience = await notify.audienceFor(id, { exclude: excluding(ctx) }, tx);
     for (const u of audience) {
       await notify.notify({
-        userId: u.id, kind: 'watching', actorId: ctx.user.id,
+        userId: u.id, kind: 'watching', ...actor(ctx),
         title: statusChange ? `Status changed on ${wp.wp_key}` : `${wp.wp_key} was edited`,
         detail: statusChange
           ? `${wp.subject} · ${statusChange.from} → ${statusChange.to}`
@@ -161,7 +184,7 @@ async function updateWorkPackage(ctx, id, patch) {
     }));
   }
 
-  const rescheduled = await reschedule(wp.project_id, { apply: true, actorId: ctx.user.id });
+  const rescheduled = await reschedule(wp.project_id, { apply: true, ...actor(ctx) });
   return { wp: await query.byId(id), automations: fired, rescheduled };
 }
 
@@ -242,13 +265,15 @@ async function createWorkPackage(ctx, body) {
       sprint_id: body.sprint_id || null,
     });
     await notify.record({
-      projectId, workPackageId: newId, actorId: ctx.user.id,
+      projectId, workPackageId: newId, ...actor(ctx),
       kind: 'status', verb: 'created', targetLabel: `WP-${newId}`,
       detail: resolved.generated ? `${resolved.subject} (subject generated)` : resolved.subject,
     }, tx);
-    if (body.assignee_id && Number(body.assignee_id) !== Number(ctx.user.id)) {
+    // Same rule as the audience: a person is not told they assigned themselves,
+    // but a machine assigning them on their own token is worth being told about.
+    if (body.assignee_id && Number(body.assignee_id) !== Number(excluding(ctx))) {
       await notify.notify({
-        userId: body.assignee_id, kind: 'assigned', actorId: ctx.user.id,
+        userId: body.assignee_id, kind: 'assigned', ...actor(ctx),
         title: 'You were assigned', detail: `WP-${newId} · ${resolved.subject}`,
         projectId, workPackageId: newId,
       }, tx);
@@ -268,7 +293,7 @@ async function createWorkPackage(ctx, body) {
  * Returns what changed, and applies it only when asked. The preview mode is what
  * lets the UI say "moving this will move four other things" before it does.
  */
-async function reschedule(projectId, { apply = false, actorId = null } = {}) {
+async function reschedule(projectId, { apply = false, actorId = null, actorLabel = null } = {}) {
   const wps = await db.query(`
     SELECT wp.id, wp.parent_id, wp.scheduling, wp.start_date, wp.due_date, wp.estimated_hours
       FROM work_packages wp WHERE wp.project_id = ?`, [projectId]);
@@ -297,7 +322,7 @@ async function reschedule(projectId, { apply = false, actorId = null } = {}) {
   }
   if (apply && changed.length) {
     await notify.record({
-      projectId, actorId, kind: 'status', verb: 'rescheduled',
+      projectId, actorId, actorLabel, kind: 'status', verb: 'rescheduled',
       detail: `${changed.length} automatically scheduled work package(s) moved`
         + (result.converged ? '' : ' — the relations did not settle, check for a loop'),
     });
@@ -357,27 +382,30 @@ async function addComment(ctx, { containerType, containerId, body, internal = fa
         if (!theirPerms.has('comment_internal')) continue;
       }
       await notify.notify({
-        userId: u.id, kind: 'mention', actorId: ctx.user.id,
-        title: `${ctx.user.name} mentioned you`,
+        userId: u.id, kind: 'mention', ...actor(ctx),
+        // The label, when there is one: "mcp - 3f2a mentioned you" is a
+        // notification whose sender the reader can act on. The issuer's name
+        // would send them looking for a message a person never wrote.
+        title: `${ctx.actorLabel || ctx.user.name} mentioned you`,
         detail: text.slice(0, 300),
         projectId, workPackageId: containerType === 'work_package' ? containerId : null,
       }, tx);
     }
     await notify.record({
       projectId, workPackageId: containerType === 'work_package' ? containerId : null,
-      actorId: ctx.user.id, kind: internal ? 'comment' : 'comment',
+      ...actor(ctx), kind: internal ? 'comment' : 'comment',
       verb: internal ? 'commented internally' : 'commented',
       detail: text.slice(0, 500),
     }, tx);
 
     if (!internal) {
       const audience = await notify.audienceFor(
-        containerType === 'work_package' ? containerId : 0, { exclude: ctx.user.id }, tx
+        containerType === 'work_package' ? containerId : 0, { exclude: excluding(ctx) }, tx
       );
       for (const u of audience) {
         if (mentioned.some((m) => Number(m.id) === Number(u.id))) continue;
         await notify.notify({
-          userId: u.id, kind: 'comment', actorId: ctx.user.id,
+          userId: u.id, kind: 'comment', ...actor(ctx),
           title: 'New comment', detail: text.slice(0, 300),
           projectId, workPackageId: containerType === 'work_package' ? containerId : null,
         }, tx);
@@ -501,4 +529,5 @@ async function attach(ctx, { containerType, containerId, file, description }) {
 module.exports = {
   updateWorkPackage, createWorkPackage, reschedule, watch, addComment, signGate,
   share, revokeShare, attach, newToken, TOKEN_ALPHABET, ancestorIds, EDITABLE, today,
+  actor,
 };

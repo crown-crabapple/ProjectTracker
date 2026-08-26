@@ -547,9 +547,16 @@ async function seedDemoPartTwo(ref, ctx) {
   }
 
   // --------------------------------------------------------------- MCP setup
+  // Upserted, not inserted: migration 0001 puts these rows in too, so that a
+  // database that was never demo-seeded still offers the tools. Inserting here
+  // would collide with it on the unique tool name.
   for (let i = 0; i < D.MCP_TOOLS.length; i += 1) {
     const [name, mode, detail, status] = D.MCP_TOOLS[i];
-    await db.insert('mcp_tools', { name, mode, detail, status, position: i, enabled: 1 });
+    await db.run(`
+      INSERT INTO mcp_tools (name, mode, detail, status, position, enabled) VALUES (?, ?, ?, ?, ?, 1)
+      ON DUPLICATE KEY UPDATE mode = VALUES(mode), detail = VALUES(detail),
+                              status = VALUES(status), position = VALUES(position), enabled = 1`,
+    [name, mode, detail, status, i]);
   }
   const crypto = require('crypto');
   const secret = 'pt_mcp_' + crypto.randomBytes(24).toString('hex');

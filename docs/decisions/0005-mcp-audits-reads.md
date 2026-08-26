@@ -37,6 +37,9 @@ The arguments are recorded verbatim for the same reason: an audit that records
 the tool but not what it was asked for cannot answer "did it read the thing it
 should not have".
 
+> Extended by `0006`, which settles what a write runs *as*, once there is more
+> than one write tool. Everything below still holds.
+
 ## Why the write tool is separately scoped, and listed conditionally
 
 `summary.write` needs `mcp_tokens.scope = 'write'`. A read token is not offered

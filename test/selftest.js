@@ -607,6 +607,142 @@ async function databaseChecks(db) {
     && audited.some((a) => a.tool === 'summary.write' && a.outcome === 'denied'),
     JSON.stringify(audited));
 
+  // --- the MCP write surface
+  //
+  // Every write goes through the same mutation functions the web app and the CLI
+  // use, so what is checked here is the MCP half: the scope, the borrowed
+  // authority, and that the trail says a machine did it.
+  const mcpWrite = await mut2.issueMcpToken(ctx, { name: 'selftest write', scope: 'write' });
+  const call = (id, name, args) => (
+    { jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }
+  );
+  const wrote = new Map((await mcpExchange(mcpWrite.secret, [
+    { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+    call(2, 'project.create', { code: 'SLF', name: 'Selftest project', template: 'SPEC' }),
+    call(3, 'version.create', { project: 'SLF', code: 'VS', name: 'Selftest slice', due_date: '2026-12-01' }),
+    call(4, 'version.create', { project: 'SLF', code: 'VS', name: 'Again' }),
+    call(5, 'work_package.create', {
+      project: 'SLF', subject: 'Written by the assistant', type: 'FEATURE',
+      assignee: 'modell', version: 'VS', due_date: '2026-11-02', story_points: 3,
+    }),
+    call(7, 'wiki.create', { project: 'SLF', title: 'Selftest wiki page', body: '# One\n\nA page.' }),
+    call(8, 'wiki.update', { slug: 'selftest-wiki-page', body: '# One\n\nRewritten.', base_revision: 0 }),
+    call(9, 'wiki.update', { slug: 'selftest-wiki-page', body: '# One\n\nStale.', base_revision: 0 }),
+  ])).map((m) => [m.id, m]));
+  const text = (id) => (wrote.get(id).result ? wrote.get(id).result.content[0].text : '');
+  const errored = (id) => Boolean(wrote.get(id).result && wrote.get(id).result.isError);
+
+  const offered = wrote.get(1).result.tools.map((t) => t.name);
+  check('a write token is offered the write tools',
+    ['project.create', 'work_package.create', 'work_package.update', 'version.create',
+      'wiki.create', 'wiki.update', 'comment.add', 'summary.write'].every((t) => offered.includes(t)),
+    `offered ${offered.join(', ')}`);
+
+  const madeProject = JSON.parse(text(2));
+  eq('project.create applies the template blueprint', madeProject.created,
+    { phases: 6, versions: 3, wiki_pages: 4, work_packages: 1 });
+  const slf = await db.scalar("SELECT id FROM projects WHERE code = 'SLF'");
+  const slfOwner = await db.scalar(`
+    SELECT u.login FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.project_id = ?`, [slf]);
+  eq('and the person who issued the token owns what it made', slfOwner, 'stephen');
+
+  check('version.create makes one', JSON.parse(text(3)).code === 'VS', text(3));
+  check('and refuses a code the project already uses', errored(4) && /already has a version/.test(text(4)),
+    text(4));
+  const madeWp = JSON.parse(text(5));
+  eq('work_package.create resolves the assignee by login', madeWp.work_package.assignee, 'M. Odell');
+  eq('and the version by code', madeWp.work_package.version, 'VS');
+  eq('wiki.create starts a page at revision 0', JSON.parse(text(7)).revision, 0);
+  eq('the first wiki.update makes revision 1', JSON.parse(text(8)).revision, 1);
+  check('and a save against a revision that has moved on is refused, not merged',
+    errored(9) && /moved on/.test(text(9)) && /revision 1/.test(text(9)), text(9));
+
+  // The second exchange, because these two need the key the first one made.
+  const onIt = new Map((await mcpExchange(mcpWrite.secret, [
+    call(1, 'work_package.update', { key: madeWp.work_package.key, status: 'done' }),
+    call(2, 'work_package.update', { key: madeWp.work_package.key, status: 'speccing', priority: 'high' }),
+    call(3, 'comment.add', { work_package: madeWp.work_package.key, body: 'From the assistant.', internal: true }),
+    call(4, 'comment.add', { work_package: madeWp.work_package.key, body: 'Picked up by @modell and @nobody.' }),
+  ])).map((m) => [m.id, m]));
+  const said = (id) => (onIt.get(id).result ? onIt.get(id).result.content[0].text : '');
+  check('work_package.update goes through the status workflow rather than round it',
+    onIt.get(1).result.isError && /cannot move straight/.test(said(1)), said(1));
+  eq('a legal transition is applied and the change is named back',
+    JSON.parse(said(2)).changed.sort(), ['priority_id', 'status_id']);
+  check('an argument the tool does not have is refused rather than ignored',
+    onIt.get(3).result.isError && /no argument called "internal"/.test(said(3)),
+    'silently dropping it would have written a comment the caller thought was internal');
+  eq('comment.add says which @mention matched nobody', JSON.parse(said(4)).unresolved, ['nobody']);
+  const mcpComment = await db.scalar('SELECT body FROM comments WHERE id = ?',
+    [JSON.parse(said(4)).id]);
+  check('a comment this server wrote says so in the comment',
+    /written by mcp/.test(String(mcpComment)),
+    `the drawer, a share and an export show the body and never the trail — body was "${mcpComment}"`);
+  const internalFromMcp = await db.scalar(
+    "SELECT COUNT(*) FROM comments WHERE internal = 1 AND author_id = ? AND body LIKE 'From the assistant%'",
+    [stephen]
+  );
+  eq('and this server writes no internal comment at all', Number(internalFromMcp), 0);
+
+  // Named after the mistake it prevents. The write borrows the authority of the
+  // person who issued the token; recording them as the actor would make an
+  // automated change indistinguishable from a human one.
+  const machineTrail = await db.query(
+    'SELECT actor_id, actor_label FROM activities WHERE project_id = ?', [slf]
+  );
+  check('an MCP write is recorded as the machine, not as the person whose token it is',
+    machineTrail.length > 0
+      && machineTrail.every((a) => a.actor_id === null && /^mcp · /.test(a.actor_label || '')),
+    JSON.stringify(machineTrail.slice(0, 3)));
+
+  // The issuer is not the actor, so they are not filtered out of the audience:
+  // being told what the assistant did on your token is the point of the inbox.
+  const toldTheIssuer = await db.one(`
+    SELECT actor_id, actor_label FROM notifications
+     WHERE user_id = ? AND actor_label LIKE 'mcp · %' ORDER BY id DESC LIMIT 1`, [stephen]);
+  check('the person whose token it is still hears what it did',
+    Boolean(toldTheIssuer) && toldTheIssuer.actor_id === null,
+    JSON.stringify(toldTheIssuer));
+
+  const writeAudit = await db.query(
+    "SELECT tool, outcome FROM mcp_audit WHERE mode = 'write' ORDER BY id"
+  );
+  check('every write is audited, the refused ones included',
+    writeAudit.some((a) => a.tool === 'project.create' && a.outcome === 'ok')
+    && writeAudit.some((a) => a.tool === 'wiki.update' && a.outcome === 'error'),
+    JSON.stringify(writeAudit));
+
+  // A scoped token creating a project would create one outside its own scope.
+  const mcpScoped = await mut2.issueMcpToken(ctx, {
+    name: 'selftest scoped write', scope: 'write', projects: [vw],
+  });
+  const scoped = await mcpExchange(mcpScoped.secret, [
+    call(1, 'project.create', { code: 'ESC', name: 'Scope escape' }),
+    call(2, 'work_package.create', { project: 'SLF', subject: 'out of scope' }),
+  ]);
+  check('a project-scoped token may not create a project',
+    scoped[0].result.isError && /outside that scope|may not create/.test(scoped[0].result.content[0].text),
+    scoped[0].result.content[0].text);
+  check('nor write to a project outside its scope',
+    scoped[1].result.isError && /in this token's scope/.test(scoped[1].result.content[0].text),
+    scoped[1].result.content[0].text);
+
+  // A token is not a person: the write runs as whoever issued it, and can do no
+  // more than they can. This one is issued in the name of a reader.
+  const readerId = await db.scalar("SELECT id FROM users WHERE login = 'jlin'");
+  const readerSecret = `pt_mcp_${crypto.randomBytes(24).toString('hex')}`;
+  await db.insert('mcp_tokens', {
+    name: 'selftest reader-issued', scope: 'write',
+    token_hash: crypto.createHash('sha256').update(readerSecret).digest('hex'),
+    token_hint: readerSecret.slice(-4), created_by: readerId,
+  });
+  const readerWrote = await mcpExchange(readerSecret, [
+    call(1, 'work_package.create', { project: 'VW', subject: 'a reader should not manage this' }),
+  ]);
+  check('a write token can do no more than the person who issued it',
+    readerWrote[0].result.isError && /add_work_packages/.test(readerWrote[0].result.content[0].text),
+    readerWrote[0].result.content[0].text);
+
   const noToken = await mcpExchange(null, [
     { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'portfolio.status', arguments: {} } },
   ]);

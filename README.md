@@ -127,9 +127,10 @@ ambient superuser, so the CLI cannot do something the web app would refuse.
 
 ## The MCP server
 
-stdio, JSON-RPC 2.0, five tools. `docs/mcp.md` has the client configuration.
+stdio, JSON-RPC 2.0, twelve tools — four that read and eight that write.
+`docs/mcp.md` has the client configuration.
 
-Four properties, each of which is the answer to a question somebody will ask:
+Five properties, each of which is the answer to a question somebody will ask:
 
 - **Every call is audited, reads included.** "What did the assistant look at" is
   the question an audit is actually asked; logging only writes answers a
@@ -138,8 +139,11 @@ Four properties, each of which is the answer to a question somebody will ask:
 - **Internal comments are never returned**, at any scope — excluded in the SQL,
   not filtered in a wrapper.
 - **A token is required and is scoped.** Read or write, and which projects.
-- **The one write tool is separately scoped.** A read token is not offered
-  `summary.write` in `tools/list` and is refused if it calls it anyway.
+- **The write tools are separately scoped.** A read token is not offered any of
+  them in `tools/list` and is refused if it calls one anyway.
+- **A write runs as the person who issued the token** and can do no more than
+  they can, calling the same mutation functions the web app calls — and the
+  activity trail records the machine rather than them. `docs/decisions/0006`.
 
 ## Testing
 
