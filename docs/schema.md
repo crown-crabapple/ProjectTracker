@@ -39,6 +39,8 @@ These are the ones worth knowing before changing anything.
 | `repositories.token_env`, `integrations.token_env` | The **name** of the environment variable, never the value. A credential is not in this database and so cannot be in a dump. |
 | `mcp_tokens.token_hash` + `token_hint` | sha256 and the last four characters. The secret is shown once at creation. |
 | `mcp_audit` | Every call, reads included. `docs/decisions/0005`. |
+| `mcp_tokens.created_by` | Who issued it, and — for a write-scoped token — whose permissions its writes run with. A token can do no more than its issuer, and one with nobody here may read and may not write. `docs/decisions/0006`. |
+| `activities.actor_label` | Set instead of `actor_id`, never beside it: `notify.record` nulls the id whenever a label is given, so a change an automation or the MCP server made can never read as one a person made. |
 | `attachments.digest` | Content addressing. Two identical uploads share one file and keep two rows, so deleting one attachment can never take the other's bytes. |
 | `activities` | Never deleted, never capped. The SeedFall tracker capped its log at 400 entries, and the cost showed up the first time nine routine entries pushed a real decision out of the window. |
 | `project_lists.filters` | The filter, never the resulting ids. A list that froze its members would go stale silently, and a stale shared link is worse than no link. |

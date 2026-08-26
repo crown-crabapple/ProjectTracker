@@ -360,11 +360,21 @@ const INTEGRATIONS = [
   ['XWiki space', 'xwiki', 'https://xwiki.seedfall.local/bin/view/SeedFall/', 'connected', 'linked · one-way read', 'vw', 'XWIKI_TOKEN'],
 ];
 
+// The write rows are in_build rather than done for the reason decision 0005
+// gives: the tools work, and the policy around them - who may issue a write
+// token, and for how long - is a decision for whoever deploys this.
 const MCP_TOOLS = [
   ['portfolio.status', 'read', 'Weighted progress, gates, health per project', 'done'],
   ['work_packages.query', 'read', 'Filter by project, status, version, sprint, assignee', 'done'],
-  ['wiki.read', 'read', 'Fetch a document by number', 'done'],
+  ['wiki.read', 'read', 'Fetch a document by number, with the revision to save against', 'done'],
   ['activity.recent', 'read', 'The audit trail, newest first, internal comments excluded', 'done'],
+  ['project.create', 'write', 'Create a project, optionally from a template blueprint', 'in_build'],
+  ['work_package.create', 'write', 'Create a work package', 'in_build'],
+  ['work_package.update', 'write', 'Change one, through the status workflow', 'in_build'],
+  ['version.create', 'write', 'Create a version', 'in_build'],
+  ['wiki.create', 'write', 'Create a wiki page', 'in_build'],
+  ['wiki.update', 'write', 'Replace a page body, refusing a stale base revision', 'in_build'],
+  ['comment.add', 'write', 'Comment on a work package or a wiki page, never internally', 'in_build'],
   ['summary.write', 'write', 'Post a generated status summary to My page', 'in_build'],
 ];
 

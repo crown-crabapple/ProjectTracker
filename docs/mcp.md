@@ -50,13 +50,54 @@ explains itself is findable.
 |---|---|---|
 | `portfolio.status` | read | Weighted readiness, gate state and health per project, plus completion as three counts |
 | `work_packages.query` | read | Filter by project, status, type, priority, version, sprint, assignee, overdue, free text |
-| `wiki.read` | read | One document by number or slug, or the list |
+| `wiki.read` | read | One document by number or slug, or the list. Returns the **revision** a save must be made against |
 | `activity.recent` | read | The activity trail, newest first |
+| `project.create` | **write** | A project, optionally from a template blueprint — its phases, versions, wiki skeleton, boards and seed work packages |
+| `work_package.create` | **write** | A work package, resolving type, status, priority, assignee, version and sprint by their codes |
+| `work_package.update` | **write** | Change one, through the status workflow, re-deriving the dates that follow it |
+| `version.create` | **write** | A version. No due date is UNSCHEDULED, which is a state and not an omission |
+| `wiki.create` | **write** | A wiki page, at revision 0 |
+| `wiki.update` | **write** | Replace a page body. `base_revision` is required |
+| `comment.add` | **write** | A comment on a work package or a wiki page. Never internal |
 | `summary.write` | **write** | Post a generated summary to a person's My page |
 
-A read-scoped token is **not offered** `summary.write` in `tools/list`. Not
-listing it is the more useful half of the refusal: a tool that is listed and
-always refuses teaches an assistant to keep trying it.
+A read-scoped token is **not offered** any of the write tools in `tools/list`.
+Not listing them is the more useful half of the refusal: a tool that is listed
+and always refuses teaches an assistant to keep trying it.
+
+`mcp_tools` is what that listing filters against — a row that is disabled is not
+offered — and the Repositories & MCP screen shows the table.
+
+### Arguments are checked against the tool's own schema
+
+An argument no tool declares is **refused**, not ignored, and the refusal lists
+the arguments the tool does take. A caller that writes `assigned_to` where the
+tool wanted `assignee` has otherwise created a work package with no assignee and
+no way to find out why. It is the rule `src/domain/query.js` applies to an
+unknown filter, for the same reason.
+
+## What a write runs as
+
+A token is not a person, and every permission here is answered per person. So a
+write **runs as whoever issued the token** — `mcp_tokens.created_by` — and calls
+the same functions in `src/api/mutations*.js` that the web app and the CLI call.
+
+- A token can do no more than its issuer. One issued in the name of a Reader is
+  refused `add_work_packages`, naming the permission.
+- The status workflow, the milestone's single date, the subject pattern and the
+  automations that fire after the commit are not reimplemented here, so they
+  cannot drift.
+- The **activity trail records the machine**, not the issuer:
+  `actor_label = 'mcp · <hint>'` and `actor_id = NULL`. A comment is signed in
+  its body as well, because the drawer, a share and an export show the body and
+  none of them read the trail.
+- A token whose `created_by` is empty may read and may not write.
+
+The token's scope narrows it further: a project-scoped token may not create a
+project, because a project it created would be outside its own scope.
+
+`docs/decisions/0006` has the argument, including the two options rejected — a
+system account with `is_admin = 1`, and a second write path inside this server.
 
 ## What the server tells the assistant about itself
 
@@ -82,8 +123,10 @@ easy to misread:
    not filtered in a wrapper.
 3. **A token is required and is scoped** — read or write, and optionally to a
    list of projects.
-4. **The write tool is separately scoped.** A read token cannot be talked into
+4. **The write tools are separately scoped.** A read token cannot be talked into
    writing, and the refusal is audited like any other call.
+5. **A write borrows its issuer's authority and is recorded as a machine.** See
+   above, and `docs/decisions/0006`.
 
 `docs/decisions/0005` has the reasoning, including what it settles from the
 design canvas's open question `D-19`.

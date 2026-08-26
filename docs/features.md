@@ -113,7 +113,8 @@ Three words are used precisely:
 
 | Item | Where | State |
 |---|---|---|
-| MCP server for AI assistants | `src/mcp/server.js`, `docs/mcp.md` | **Done.** Five tools, a scoped token, and an audit that records reads as well as writes. See `docs/decisions/0005`. |
+| MCP server for AI assistants | `src/mcp/server.js`, `docs/mcp.md` | **Done.** Twelve tools — four read, eight write — a scoped token, and an audit that records reads as well as writes. A write runs as the person who issued the token, can do no more than they can, and calls the same mutation functions the web app calls; the activity trail records the machine rather than them. See `docs/decisions/0005` and `0006`. |
+| An assistant creating work | `src/mcp/server.js`, `src/api/mutations2.js` | **Done.** A project (with its template blueprint), a work package, a version, a wiki page and a comment are all creatable over MCP, and a work package is changeable through the status workflow. **Partial in the web app:** versions and wiki pages have no create form there — `createVersion` and `createDocument` exist and are reached by the MCP server and by insert, not by a route. |
 | Responsive design | `public/app.css` | **Done.** Three breakpoints chosen from what actually breaks: 1100px (two-column dashboards), 860px (the rail becomes a drawer), 560px (the eleven-column work table becomes a card list). Verified at 390px with no horizontal overflow. There is also a print stylesheet, because a build plan goes into a meeting on paper. |
 
 ---

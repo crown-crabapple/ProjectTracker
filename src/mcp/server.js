@@ -28,8 +28,18 @@
  *     which is more useful than failing to start, because the client's error
  *     surface for "process died" is usually nothing at all.
  *
- *  4. THE ONE WRITE TOOL IS SEPARATELY SCOPED. summary.write needs scope=write.
- *     A read token cannot reach it, and the refusal is audited like any call.
+ *  4. THE WRITE TOOLS ARE SEPARATELY SCOPED. Every tool whose mode is 'write'
+ *     needs scope=write. A read token is not offered them in tools/list at all
+ *     and is refused if it calls one anyway, and the refusal is audited.
+ *
+ *  5. A WRITE BORROWS THE AUTHORITY OF WHOEVER ISSUED THE TOKEN, AND THE TRAIL
+ *     RECORDS THE MACHINE. A token is not a person and the tracker's permissions
+ *     are per person, so there is no membership to check for "the assistant".
+ *     Every write runs as the token's issuer — it can never do what they could
+ *     not — and goes through the same mutation functions the web app and the
+ *     CLI use, so there is one write model and not a second one here. The
+ *     activity trail then names the machine INSTEAD OF the issuer. See
+ *     docs/decisions/0006.
  */
 
 'use strict';
@@ -41,6 +51,12 @@ const rollup = require('../domain/rollup');
 const lifecycle = require('../domain/lifecycle');
 const query = require('../domain/query');
 const notify = require('../domain/notify');
+// The write tools call these rather than writing SQL of their own. A second
+// write path would be a second set of rules — the status workflow, the
+// milestone's single date, the subject pattern, the automations that fire after
+// the commit — and the two would drift.
+const mutations = require('../api/mutations');
+const mutations2 = require('../api/mutations2');
 
 const PROTOCOL_VERSION = '2024-11-05';
 const SERVER_INFO = { name: 'projecttracker', version: '0.1.0' };
@@ -65,6 +81,8 @@ async function loadToken() {
     scope: row.scope,
     projectScope: db.json(row.project_scope, null),
     includesInternal: Boolean(row.includes_internal),
+    // Who issued it. A write runs as this person and can never exceed them.
+    issuerId: row.created_by ? Number(row.created_by) : null,
   };
 }
 
@@ -75,6 +93,190 @@ async function scopedProjectIds() {
   const allowed = new Set(token.projectScope.map(Number));
   return all.filter((id) => allowed.has(id));
 }
+
+// ------------------------------------------------------ writing: who, and what
+
+/**
+ * The context a write runs as.
+ *
+ * A token is not a person, and every permission in this tracker is answered per
+ * person: there is no membership, and no role, for "the assistant". So a write
+ * borrows the authority of whoever issued the token. It can do what they can do
+ * and nothing more, which is what stops a token being a way around a role.
+ *
+ * `actorLabel` is the other half. It goes to the same mutation functions the web
+ * app calls, and `notify.record` records the label INSTEAD OF the issuer's id,
+ * so an MCP write reads as a machine in the activity trail rather than as the
+ * person whose authority it borrowed.
+ */
+async function writeContext() {
+  if (!token.issuerId) {
+    throw new Error(
+      'this token has nobody recorded as having issued it, so there is no authority to write with. '
+      + 'Issue a new token in Administration -> Repositories & MCP.'
+    );
+  }
+  const user = await db.one(
+    'SELECT id, login, name, is_admin, kind, active FROM users WHERE id = ?', [token.issuerId]
+  );
+  if (!user || !user.active) {
+    throw new Error('the account that issued this token is gone or deactivated, so it may no longer write');
+  }
+  return {
+    user: { ...user, is_admin: Boolean(user.is_admin) },
+    actorLabel: `mcp · ${token.hint || 'unknown token'}`,
+  };
+}
+
+/**
+ * The line that says a machine wrote this, appended to the text it wrote.
+ *
+ * The activity trail carries the same fact as data, but a comment is read in the
+ * drawer, in a share, in an export and in the CLI, and none of those read the
+ * trail. The email intake already solves this the same way — an emailed comment
+ * ends "— received by email from …" — so this follows the convention that is
+ * here rather than adding a column beside `comments.author_id` for it.
+ *
+ * The byline stays the person whose authority was used, which is what
+ * `author_id` means. The line says who actually typed it.
+ */
+const writtenBy = (ctx) => `written by ${ctx.actorLabel}`;
+
+/** A project by code or identifier, refused unless the token can see it. */
+async function projectInScope(code, what = 'project') {
+  const wanted = String(code || '').trim();
+  if (!wanted) throw new Error(`${what} is required, as a project code, e.g. "VW"`);
+  const p = await db.one('SELECT id, code, name FROM projects WHERE code = ? OR identifier = ?',
+    [wanted.toUpperCase(), wanted.toLowerCase()]);
+  const ids = await scopedProjectIds();
+  if (!p || !ids.includes(Number(p.id))) throw new Error(`no project "${wanted}" in this token's scope`);
+  return p;
+}
+
+/** 'WP-112' or '112' -> the row, refused unless the token can see its project. */
+async function workPackageInScope(key) {
+  const m = /^(?:WP-)?(\d+)$/i.exec(String(key || '').trim());
+  if (!m) throw new Error(`"${key}" is not a work package key - expected WP-112`);
+  const wp = await query.byId(Number(m[1]));
+  if (!wp) throw new Error(`no work package ${String(key).toUpperCase()}`);
+  const ids = await scopedProjectIds();
+  if (!ids.includes(Number(wp.project_id))) throw new Error(`${wp.wp_key} is not in this token's scope`);
+  return wp;
+}
+
+/** A wiki document by number or slug, refused unless the token can see it. */
+async function documentInScope({ number, slug, project }) {
+  if (!number && !slug) throw new Error('which document? give its number or its slug');
+  const ids = await scopedProjectIds();
+  const clause = db.inClause(ids.length ? ids : [0]);
+  const doc = await db.one(`
+    SELECT d.*, (SELECT COALESCE(MAX(v.revision), 0) FROM document_versions v WHERE v.document_id = d.id) AS revision
+      FROM documents d
+     WHERE d.project_id IN ${clause.sql}
+       AND (d.number = ? OR d.slug = ?)
+       ${project ? 'AND d.project_id = ?' : ''}
+     LIMIT 1`,
+  [...clause.params, number || '', slug || '', ...(project ? [project] : [])]);
+  // A portfolio-wide document has no project, and so no project permission to
+  // check a write against. It is readable through wiki.read and not writable
+  // here, which is said rather than left to look like "not found".
+  if (!doc) throw new Error('no such wiki page in this token\'s scope (a portfolio-wide page is read-only here)');
+  return doc;
+}
+
+/** A user, by login or full name. Errors name what the person was wanted for. */
+async function activeUser(who, what) {
+  const u = await db.one('SELECT id, name FROM users WHERE (login = ? OR name = ?) AND active = 1', [who, who]);
+  if (!u) throw new Error(`no active user "${who}" to be the ${what}`);
+  return u;
+}
+
+/** One of a vocabulary table's codes, or an error that lists them. */
+async function byCode(table, code, what) {
+  const row = await db.one(`SELECT id, code FROM ${db.ident(table)} WHERE code = ?`, [String(code)]);
+  if (!row) {
+    const all = (await db.query(`SELECT code FROM ${db.ident(table)} ORDER BY id`)).map((r) => r.code);
+    throw new Error(`no ${what} "${code}" - use one of ${all.join(', ')}`);
+  }
+  return row;
+}
+
+/**
+ * The vocabulary arguments both work package tools take, resolved to ids.
+ *
+ * One function for create and update, so "status" means the same thing in both
+ * and a code that is wrong is refused the same way in both.
+ */
+async function workPackageFields(args, projectId) {
+  const out = {};
+  if (args.subject !== undefined) out.subject = args.subject;
+  if (args.description !== undefined) out.description = args.description;
+  if (args.start_date !== undefined) out.start_date = args.start_date || null;
+  if (args.due_date !== undefined) out.due_date = args.due_date || null;
+  // Checked here rather than left to the database: a number that arrived as
+  // "about twelve" becomes NaN, and NaN reaches SQL as a syntax error nobody can
+  // read back to the argument that caused it.
+  if (args.estimated_hours !== undefined) {
+    const hours = Number(args.estimated_hours);
+    if (!Number.isFinite(hours) || hours < 0) throw new Error('estimated_hours is a number of hours, 0 or more');
+    out.estimated_hours = hours;
+  }
+  if (args.story_points !== undefined) {
+    if (args.story_points === null || args.story_points === '') out.story_points = null;
+    else {
+      const points = Number(args.story_points);
+      if (!Number.isInteger(points) || points < 0) throw new Error('story_points is a whole number, 0 or more');
+      out.story_points = points;
+    }
+  }
+
+  if (args.status) out.status_id = (await byCode('statuses', args.status, 'status')).id;
+  if (args.priority) out.priority_id = (await byCode('priorities', args.priority, 'priority')).id;
+  if (args.assignee !== undefined) {
+    out.assignee_id = args.assignee ? (await activeUser(args.assignee, 'assignee')).id : null;
+  }
+  if (args.accountable !== undefined) {
+    out.accountable_id = args.accountable ? (await activeUser(args.accountable, 'accountable')).id : null;
+  }
+  if (args.version !== undefined) {
+    if (!args.version) out.version_id = null;
+    else {
+      const v = await db.one('SELECT id FROM versions WHERE project_id = ? AND code = ?', [projectId, args.version]);
+      if (!v) throw new Error(`no version "${args.version}" in this project - create it with version.create`);
+      out.version_id = v.id;
+    }
+  }
+  if (args.sprint !== undefined) {
+    if (!args.sprint) out.sprint_id = null;
+    else {
+      const sp = await db.one('SELECT id FROM sprints WHERE code = ?', [args.sprint]);
+      if (!sp) throw new Error(`no sprint "${args.sprint}"`);
+      out.sprint_id = sp.id;
+    }
+  }
+  if (args.parent !== undefined) {
+    out.parent_id = args.parent ? (await workPackageInScope(args.parent)).id : null;
+  }
+  return out;
+}
+
+/** The compact work package a write tool hands back. */
+const wpSummary = (w) => ({
+  key: w.wp_key,
+  project: w.project_code,
+  type: w.type_name,
+  subject: w.subject,
+  status: w.status_code,
+  priority: w.priority_code,
+  assignee: w.assignee_name,
+  start_date: w.start_date,
+  due_date: w.due_date,
+  estimated_hours: Number(w.estimated_hours),
+  story_points: w.story_points,
+  version: w.version_code,
+  sprint: w.sprint_code,
+  parent: w.parent_id ? `WP-${w.parent_id}` : null,
+});
 
 async function audit(tool, mode, args, outcome, note, rowCount, ms, projectIds) {
   await db.insert('mcp_audit', {
@@ -259,7 +461,11 @@ const TOOLS = {
         return { documents: docs, note: 'Pass number or slug to read one.' };
       }
       const doc = await db.one(`
-        SELECT d.*, p.code AS project, u.name AS updated_by_name
+        SELECT d.*, p.code AS project, u.name AS updated_by_name,
+               -- The revision a save must be made against. 0 is a page that has
+               -- never been saved since it was created, which is a real state
+               -- and not a missing one.
+               (SELECT COALESCE(MAX(v.revision), 0) FROM document_versions v WHERE v.document_id = d.id) AS revision
           FROM documents d
           LEFT JOIN projects p ON p.id = d.project_id
           LEFT JOIN users u ON u.id = d.updated_by
@@ -273,6 +479,8 @@ const TOOLS = {
         title: doc.title,
         project: doc.project,
         status: doc.status,
+        revision: Number(doc.revision),
+        writable: doc.project_id !== null,
         word_count: doc.word_count,
         section_count: doc.section_count,
         updated_at: doc.updated_at,
@@ -332,6 +540,347 @@ const TOOLS = {
           to: a.to_value,
           detail: a.detail,
         })),
+      };
+    },
+  },
+
+  'project.create': {
+    mode: 'write',
+    description:
+      'Create a project. With a template code, the template\'s blueprint comes with it: its phases and '
+      + 'gates, its versions, its wiki skeleton, its boards and its seed work packages, all in one '
+      + 'transaction. The person who issued this token becomes the project\'s owner, because a project '
+      + 'with no owner is a project nobody can sign a gate on. A token scoped to a list of projects may '
+      + 'not create one.',
+    schema: {
+      type: 'object',
+      properties: {
+        code: { type: 'string', description: '2-16 letters or digits, e.g. "VW". Uppercased.' },
+        name: { type: 'string' },
+        description: { type: 'string' },
+        template: { type: 'string', description: 'A project template code. Omit for a project with no structure.' },
+        program: { type: 'string', description: 'A program code, to place it in the portfolio.' },
+        parent: { type: 'string', description: 'A parent project code.' },
+      },
+      required: ['code', 'name'],
+      additionalProperties: false,
+    },
+    async run(args) {
+      const ctx = await writeContext();
+      // A scoped token creating a project would create one outside its own
+      // scope, and then be unable to see what it made. That is the scope
+      // escaping rather than being enforced.
+      if (token.projectScope) {
+        throw new Error(
+          `this token is scoped to ${token.projectScope.length} project(s), so it may not create a new one `
+          + '- a project it created would be outside its own scope. Creating projects needs an unscoped '
+          + 'write token.'
+        );
+      }
+      const body = {
+        code: args.code, name: args.name, description: args.description || null,
+      };
+      if (args.template) {
+        const t = await db.one('SELECT id, code FROM project_templates WHERE code = ? AND archived = 0',
+          [String(args.template).toUpperCase()]);
+        if (!t) {
+          const all = (await db.query('SELECT code FROM project_templates WHERE archived = 0 ORDER BY id'))
+            .map((r) => r.code);
+          throw new Error(`no project template "${args.template}"`
+            + (all.length ? ` - use one of ${all.join(', ')}` : ' - this database has none'));
+        }
+        body.template_id = t.id;
+      }
+      if (args.program) {
+        const g = await db.one('SELECT id FROM programs WHERE code = ? AND archived = 0',
+          [String(args.program).toUpperCase()]);
+        if (!g) throw new Error(`no program "${args.program}"`);
+        body.program_id = g.id;
+      }
+      if (args.parent) body.parent_id = (await projectInScope(args.parent, 'parent')).id;
+
+      const created = await mutations2.createProject(ctx, body);
+      const counts = await db.one(`
+        SELECT (SELECT COUNT(*) FROM project_phases WHERE project_id = ?) AS phases,
+               (SELECT COUNT(*) FROM versions       WHERE project_id = ?) AS versions,
+               (SELECT COUNT(*) FROM documents      WHERE project_id = ?) AS documents,
+               (SELECT COUNT(*) FROM work_packages  WHERE project_id = ?) AS work_packages`,
+      [created.id, created.id, created.id, created.id]);
+      return {
+        code: created.code,
+        identifier: created.identifier,
+        owner: ctx.user.login,
+        from_template: args.template || null,
+        created: {
+          phases: Number(counts.phases),
+          versions: Number(counts.versions),
+          wiki_pages: Number(counts.documents),
+          work_packages: Number(counts.work_packages),
+        },
+      };
+    },
+  },
+
+  'work_package.create': {
+    mode: 'write',
+    description:
+      'Create a work package. The type decides whether a subject can be generated from its pattern and '
+      + 'whether the thing is a milestone, which has one date rather than two. Automations that watch for '
+      + 'a new work package fire after the row is committed, and what they did comes back in the result.',
+    schema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Project code, e.g. "VW".' },
+        subject: { type: 'string', description: 'Omit only when the type generates one from a pattern.' },
+        type: { type: 'string', description: 'PHASE, EPIC, FEATURE, TASK, BUG, MILESTONE. Defaults to TASK.' },
+        description: { type: 'string', description: 'Markdown.' },
+        parent: { type: 'string', description: 'A work package key, e.g. "WP-112".' },
+        status: { type: 'string', description: 'A status code. Defaults to the default status.' },
+        priority: { type: 'string', description: 'low, normal, high, immediate.' },
+        assignee: { type: 'string', description: 'A login or a full name.' },
+        accountable: { type: 'string', description: 'A login or a full name. Defaults to the token\'s issuer.' },
+        start_date: { type: 'string', description: 'YYYY-MM-DD.' },
+        due_date: { type: 'string', description: 'YYYY-MM-DD. A milestone uses this one and no start.' },
+        estimated_hours: { type: 'number' },
+        story_points: { type: 'integer' },
+        version: { type: 'string', description: 'A version code in the same project.' },
+        sprint: { type: 'string', description: 'A sprint code.' },
+      },
+      required: ['project'],
+      additionalProperties: false,
+    },
+    async run(args) {
+      const ctx = await writeContext();
+      const project = await projectInScope(args.project);
+      const fields = await workPackageFields(args, project.id);
+      const out = await mutations.createWorkPackage(ctx, {
+        ...fields, project_id: project.id, type: args.type || 'TASK',
+      });
+      return {
+        work_package: wpSummary(out.wp),
+        subject_generated: Boolean(out.generatedSubject),
+        automations: out.automations,
+      };
+    },
+  },
+
+  'work_package.update': {
+    mode: 'write',
+    description:
+      'Change a work package. A status change is checked against the workflow in administration rather '
+      + 'than being allowed anywhere, so a move the workflow does not have is refused and says so. '
+      + 'Changing a date re-derives the automatically scheduled dates that follow it, and the count of '
+      + 'what moved comes back with the result.',
+    schema: {
+      type: 'object',
+      properties: {
+        key: { type: 'string', description: 'The work package key, e.g. "WP-112".' },
+        subject: { type: 'string' },
+        description: { type: 'string' },
+        status: { type: 'string', description: 'A status code.' },
+        priority: { type: 'string' },
+        assignee: { type: 'string', description: 'A login or a full name. Empty string unassigns.' },
+        accountable: { type: 'string' },
+        parent: { type: 'string', description: 'A work package key. Empty string detaches it.' },
+        start_date: { type: 'string', description: 'YYYY-MM-DD, or empty to clear.' },
+        due_date: { type: 'string', description: 'YYYY-MM-DD, or empty to clear.' },
+        estimated_hours: { type: 'number' },
+        story_points: { type: 'integer' },
+        version: { type: 'string', description: 'A version code, or empty to clear.' },
+        sprint: { type: 'string', description: 'A sprint code, or empty to clear.' },
+      },
+      required: ['key'],
+      additionalProperties: false,
+    },
+    async run(args) {
+      const ctx = await writeContext();
+      const wp = await workPackageInScope(args.key);
+      // `key` is not one of the fields, and workPackageFields reads only the
+      // ones it knows, so there is nothing to strip out of the arguments first.
+      const patch = await workPackageFields(args, wp.project_id);
+      if (!Object.keys(patch).length) {
+        throw new Error('nothing to change - pass at least one attribute besides the key');
+      }
+      const out = await mutations.updateWorkPackage(ctx, wp.id, patch);
+      return {
+        work_package: wpSummary(out.wp),
+        changed: Object.keys(patch),
+        automations: out.automations,
+        dates_moved: out.rescheduled.changed.length,
+      };
+    },
+  },
+
+  'version.create': {
+    mode: 'write',
+    description:
+      'Create a version in a project. A version with no due date is legitimate and the roadmap draws it '
+      + 'as UNSCHEDULED, which is not the same as one somebody forgot to date. A code already used in '
+      + 'the project is refused rather than suffixed.',
+    schema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Project code.' },
+        code: { type: 'string', description: 'Short, e.g. "V1".' },
+        name: { type: 'string', description: 'Defaults to the code.' },
+        description: { type: 'string' },
+        start_date: { type: 'string', description: 'YYYY-MM-DD.' },
+        due_date: { type: 'string', description: 'YYYY-MM-DD. Omit for an unscheduled version.' },
+        sharing: {
+          type: 'string',
+          enum: ['none', 'descendants', 'hierarchy', 'tree', 'system'],
+          description: 'Who else may assign work to it. Defaults to none.',
+        },
+      },
+      required: ['project', 'code'],
+      additionalProperties: false,
+    },
+    async run(args) {
+      const ctx = await writeContext();
+      const project = await projectInScope(args.project);
+      const version = await mutations2.createVersion(ctx, {
+        project_id: project.id,
+        code: args.code,
+        name: args.name,
+        description: args.description,
+        start_date: args.start_date,
+        due_date: args.due_date,
+        sharing: args.sharing,
+      });
+      return { project: project.code, ...version };
+    },
+  },
+
+  'wiki.create': {
+    mode: 'write',
+    description:
+      'Create a wiki page in a project. The slug is derived from the title unless one is given, and a '
+      + 'slug already used in the project is refused: two pages a person cannot tell apart in a link is '
+      + 'worse than being asked for another name. A new page is at revision 0 - "as created" - and the '
+      + 'first wiki.update makes revision 1.',
+    schema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Project code.' },
+        title: { type: 'string' },
+        body: { type: 'string', description: 'Markdown. May be empty for a stub.' },
+        number: { type: 'string', description: 'Its place in a numbered set, e.g. "05".' },
+        slug: { type: 'string', description: 'Defaults to the title, lowercased and hyphenated.' },
+        status: { type: 'string', description: 'DRAFT, REVIEW, AGREED, … Defaults to DRAFT.' },
+      },
+      required: ['project', 'title'],
+      additionalProperties: false,
+    },
+    async run(args) {
+      const ctx = await writeContext();
+      const project = await projectInScope(args.project);
+      const doc = await mutations2.createDocument(ctx, {
+        project_id: project.id,
+        title: args.title,
+        slug: args.slug,
+        number: args.number,
+        body: args.body,
+        status: args.status,
+      });
+      return { project: project.code, ...doc };
+    },
+  },
+
+  'wiki.update': {
+    mode: 'write',
+    description:
+      'Replace the body of a wiki page. base_revision is required and is the revision you read: a save '
+      + 'against a revision that has moved on is REFUSED rather than merged, and the error says what the '
+      + 'page is at now so you can read it again. Read the page with wiki.read first - it returns the '
+      + 'revision to pass here.',
+    schema: {
+      type: 'object',
+      properties: {
+        number: { type: 'string', description: 'The document number, e.g. "05".' },
+        slug: { type: 'string' },
+        project: { type: 'string', description: 'Project code, when a number or slug is used twice.' },
+        body: { type: 'string', description: 'Markdown. This replaces the whole page.' },
+        base_revision: { type: 'integer', description: 'The revision wiki.read returned. 0 for a page never saved.' },
+        note: { type: 'string', description: 'What changed, kept with the revision.' },
+      },
+      required: ['body', 'base_revision'],
+      additionalProperties: false,
+    },
+    async run(args) {
+      const ctx = await writeContext();
+      const project = args.project ? (await projectInScope(args.project)).id : null;
+      const doc = await documentInScope({ number: args.number, slug: args.slug, project });
+      try {
+        const saved = await mutations2.saveDocument(ctx, doc.id, {
+          body: args.body,
+          baseRevision: Number(args.base_revision),
+          // The note is what the wiki's revision list shows, and it is the only
+          // place on that screen a machine's revision can say so.
+          note: args.note ? `${args.note} — ${writtenBy(ctx)}` : writtenBy(ctx),
+        });
+        return { number: doc.number, slug: doc.slug, title: doc.title, ...saved };
+      } catch (e) {
+        // The refusal carries the current revision so the next call can be
+        // right. An error that says only "conflict" makes the assistant guess.
+        if (e.currentRevision !== undefined) {
+          throw new Error(`${e.message}. Read it again with wiki.read and save against revision ${e.currentRevision}.`);
+        }
+        throw e;
+      }
+    },
+  },
+
+  'comment.add': {
+    mode: 'write',
+    description:
+      'Comment on a work package or a wiki page. The comment is signed with this server\'s name, '
+      + 'because a comment is read in the drawer and in a share, and neither of those reads the '
+      + 'activity trail that records who wrote it. @mentions are resolved and notify the people they '
+      + 'match, and the handles that matched nobody come back in the result rather than failing '
+      + 'silently. This server never writes an internal comment.',
+    schema: {
+      type: 'object',
+      properties: {
+        work_package: { type: 'string', description: 'A work package key, e.g. "WP-112".' },
+        wiki: { type: 'string', description: 'A wiki page number or slug. Use one of this or work_package.' },
+        project: { type: 'string', description: 'Project code, to disambiguate a wiki page.' },
+        body: { type: 'string', description: 'Markdown.' },
+      },
+      required: ['body'],
+      additionalProperties: false,
+    },
+    async run(args) {
+      const ctx = await writeContext();
+      if (Boolean(args.work_package) === Boolean(args.wiki)) {
+        throw new Error('comment on one thing: pass work_package or wiki, not both and not neither');
+      }
+      let containerType = 'work_package';
+      let containerId = null;
+      let target = null;
+      if (args.work_package) {
+        const wp = await workPackageInScope(args.work_package);
+        containerId = wp.id;
+        target = wp.wp_key;
+      } else {
+        const project = args.project ? (await projectInScope(args.project)).id : null;
+        const doc = await documentInScope({ number: args.wiki, slug: args.wiki, project });
+        containerType = 'document';
+        containerId = doc.id;
+        target = doc.slug;
+      }
+      // Never internal, at any scope. This server cannot read an internal
+      // comment back, and a comment nobody can audit is not one to be able to
+      // write. The argument does not exist rather than being refused, so there
+      // is nothing to keep trying.
+      const out = await mutations.addComment(ctx, {
+        containerType, containerId, internal: false,
+        body: `${args.body}\n\n— ${writtenBy(ctx)}`,
+      });
+      return {
+        id: out.id, on: target, mentioned: out.mentioned, unresolved: out.unresolved,
+        note: out.unresolved.length
+          ? `@${out.unresolved.join(', @')} matched nobody, so nobody was told`
+          : undefined,
       };
     },
   },
@@ -402,6 +951,40 @@ const TOOLS = {
   },
 };
 
+/**
+ * Check the arguments against the tool's own schema before running it.
+ *
+ * An argument this server does not know is REFUSED, not ignored. A caller that
+ * writes `assigned_to` where the tool wanted `assignee`, and is told nothing,
+ * has created a work package with no assignee and no way to find out why. It is
+ * the same rule `src/domain/query.js` applies to an unknown filter, for the same
+ * reason: silently ignoring one does something other than what was asked.
+ *
+ * Deliberately shallow — required keys, unknown keys, and a declared enum. Types
+ * are left to the tool, which has to check them against the database anyway.
+ */
+function checkArguments(tool, args) {
+  const schema = tool.schema || {};
+  const known = Object.keys(schema.properties || {});
+  for (const r of schema.required || []) {
+    if (args[r] === undefined || args[r] === null) throw new Error(`"${r}" is required`);
+  }
+  if (schema.additionalProperties === false) {
+    const unknown = Object.keys(args).filter((k) => !known.includes(k));
+    if (unknown.length) {
+      throw new Error(
+        `no argument called ${unknown.map((u) => `"${u}"`).join(', ')} - this tool takes ${known.join(', ')}`
+      );
+    }
+  }
+  for (const [k, v] of Object.entries(args)) {
+    const spec = (schema.properties || {})[k];
+    if (spec && spec.enum && v !== undefined && !spec.enum.includes(v)) {
+      throw new Error(`"${k}" is one of ${spec.enum.join(', ')}, not "${v}"`);
+    }
+  }
+}
+
 // --------------------------------------------------------------- JSON-RPC
 
 const respond = (id, result) => write({ jsonrpc: '2.0', id, result });
@@ -427,7 +1010,12 @@ async function handle(message) {
         + 'Deferred and rejected work is excluded from the denominator rather than scored zero. Story '
         + 'points are summed over leaf work only, so a parent never counts its children. Internal '
         + 'comments are never returned by any tool. Every call you make is recorded in an audit table, '
-        + 'reads included.',
+        + 'reads included. '
+        + 'The write tools run with the permissions of the person who issued this token and can do no '
+        + 'more than they can, and every change they make is recorded in the activity trail as coming '
+        + 'from this server rather than from that person. A status change goes through the workflow in '
+        + 'administration, so a transition it does not have is refused; a wiki save is refused when the '
+        + 'page has moved on since you read it, rather than being merged.',
     });
   }
 
@@ -481,6 +1069,7 @@ async function handle(message) {
     }
 
     try {
+      checkArguments(tool, args);
       const result = await tool.run(args);
       const rowCount = result.count !== undefined ? result.count
         : Array.isArray(result.projects) ? result.projects.length : null;

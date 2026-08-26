@@ -22,7 +22,9 @@ model.
 ### Data
 - `db/schema.sql` — 85 tables, sectioned by domain, with the derivation for
   every non-obvious column. The base; applied only to an empty schema.
-- `db/migrations/NNNN_*.sql` — changes after that. Empty today.
+- `db/migrations/NNNN_*.sql` — changes after that. One today: `0001` adds the
+  `mcp_tools` rows for the write tools, so a database seeded before them still
+  offers them.
 - `db/migrate.js` — creates the database, applies the base then the migrations,
   records what ran in `schema_migrations`, and leaves **one account that can sign
   in** so the demo portfolio is optional. It only ever adds that account when
@@ -68,8 +70,9 @@ model.
 - `src/api/views3.js` — boards, backlogs, roadmap, calendar, planner, activity page.
 - `src/api/views4.js` — wiki, meetings, connections, administration, the drawer.
 - `src/api/mutations.js` — work packages, comments, gates, shares, attachments.
-- `src/api/mutations2.js` — projects, baselines, sprints, boards, wiki, meetings,
-  preferences, allocations, administration, MCP tokens, the email intake.
+- `src/api/mutations2.js` — projects, versions, baselines, sprints, boards, wiki,
+  meetings, preferences, allocations, administration, MCP tokens, the email
+  intake.
 - `src/api/exports.js` — CSV, XLSX, PDF and iCal, each written by hand with the
   reason stated in the header.
 
@@ -88,7 +91,9 @@ model.
 - `public/lib/md.js` — a markdown renderer that builds nodes, not a string.
 - `public/views/*.js` — one file per screen, matching the API endpoint.
 - `src/cli/tracker.js` — the command line.
-- `src/mcp/server.js` — the MCP server: five tools, a scoped token, a full audit.
+- `src/mcp/server.js` — the MCP server: twelve tools (four read, eight write), a
+  scoped token, a full audit. A write runs as the token's issuer and is recorded
+  as a machine; it calls `src/api/mutations*.js` rather than writing its own SQL.
 
 ### Checks and records
 - `test/selftest.js` — 200 checks against a throwaway database.

@@ -11,7 +11,7 @@ const access = require('../domain/access');
 const notify = require('../domain/notify');
 const automations = require('../domain/automations');
 const files = require('../domain/files');
-const { newToken, today } = require('./mutations');
+const { newToken, today, actor } = require('./mutations');
 const { badRequest, notFound, forbidden, conflict } = require('../http/router');
 
 // ------------------------------------------------------------------- projects
@@ -105,7 +105,7 @@ async function createProject(ctx, body) {
     }
 
     await notify.record({
-      projectId: id, actorId: ctx.user.id, kind: 'project', verb: 'created a project',
+      projectId: id, ...actor(ctx), kind: 'project', verb: 'created a project',
       targetLabel: code,
       detail: template ? `from the ${template.code} template — ${template.detail}` : 'with no template',
     }, tx);
@@ -162,6 +162,66 @@ async function setHealth(ctx, projectId, { health, note }) {
     from: before ? before.health : null, to: health, detail: note || null,
   });
   return { health, note };
+}
+
+// ------------------------------------------------------------------- versions
+
+/**
+ * Create a version.
+ *
+ * A version is the roadmap's unit and the release notes' heading, so the two
+ * things worth refusing are refused here: a code that already exists in the
+ * project (the roadmap would draw two bars with one name and no way to tell
+ * them apart), and a due date before the start date.
+ *
+ * A version with no due date is legitimate and the roadmap prints it as
+ * UNSCHEDULED. That is not the same as a version somebody forgot to date, and
+ * the roadmap says which one it is looking at.
+ */
+const VERSION_SHARING = ['none', 'descendants', 'hierarchy', 'tree', 'system'];
+
+async function createVersion(ctx, body) {
+  const projectId = Number(body.project_id);
+  if (!projectId) throw badRequest('project_id is required');
+  await access.require(ctx.user.id, projectId, 'manage_versions');
+
+  const code = String(body.code || '').trim();
+  const name = String(body.name || '').trim() || code;
+  if (!code) throw badRequest('a version needs a code, e.g. "V1"');
+  if (code.length > 32) throw badRequest('a version code is at most 32 characters');
+  if (!name) throw badRequest('a version needs a name');
+
+  const clash = await db.one('SELECT id FROM versions WHERE project_id = ? AND code = ?', [projectId, code]);
+  if (clash) throw conflict(`this project already has a version called ${code}`);
+
+  const startDate = body.start_date || null;
+  const dueDate = body.due_date || null;
+  if (startDate && dueDate && dueDate < startDate) throw badRequest('the due date is before the start date');
+
+  const sharing = body.sharing || 'none';
+  if (!VERSION_SHARING.includes(sharing)) {
+    throw badRequest(`sharing is one of ${VERSION_SHARING.join(', ')}`);
+  }
+
+  const position = Number(await db.scalar(
+    'SELECT COALESCE(MAX(position), 0) + 1 FROM versions WHERE project_id = ?', [projectId]
+  ));
+
+  const id = await db.transaction(async (tx) => {
+    const newId = await tx.insert('versions', {
+      project_id: projectId, code, name,
+      description: body.description || null,
+      start_date: startDate, due_date: dueDate,
+      state: 'open', sharing, position,
+    });
+    await notify.record({
+      projectId, ...actor(ctx), kind: 'version', verb: 'added a version',
+      targetLabel: code,
+      detail: `${name}${dueDate ? ` - due ${dueDate}` : ' - unscheduled'}`,
+    }, tx);
+    return newId;
+  });
+  return { id, code, name, state: 'open', sharing, due_date: dueDate };
 }
 
 // ------------------------------------------------------------------ baselines
@@ -261,6 +321,74 @@ async function reorderBacklog(ctx, projectId, orderedIds) {
 // ----------------------------------------------------------------------- wiki
 
 /**
+ * Word and section counts for a body.
+ *
+ * One function because `documents.word_count` and `section_count` are cached,
+ * and the schema says the writer that sets the body is the only thing allowed to
+ * set them. Two writers counting two ways is how a cached count drifts from what
+ * it caches.
+ */
+function measure(text) {
+  const s = String(text || '');
+  return {
+    word_count: s.trim() ? s.trim().split(/\s+/).length : 0,
+    section_count: (s.match(/^#{1,6} /gm) || []).length,
+  };
+}
+
+/**
+ * Create a wiki page.
+ *
+ * The slug is the document's address in the URL, so it is derived from the title
+ * unless one is given, and a clash inside the project is refused rather than
+ * suffixed: two pages a person cannot tell apart in a link is worse than being
+ * asked to pick another name.
+ *
+ * A page starts at revision 0 — "as created". The first save makes revision 1,
+ * which is what a wiki page created from a project template does too.
+ */
+async function createDocument(ctx, body) {
+  const projectId = Number(body.project_id);
+  // A portfolio-wide document (project_id NULL) has no project to check
+  // edit_wiki against. It is created by insert, deliberately, rather than being
+  // the one write in this file with no permission behind it.
+  if (!projectId) throw badRequest('a wiki page needs a project - a portfolio-wide document is not created here');
+  await access.require(ctx.user.id, projectId, 'edit_wiki');
+
+  const title = String(body.title || '').trim();
+  if (!title) throw badRequest('a wiki page needs a title');
+  if (title.length > 250) throw badRequest('a wiki title is at most 250 characters');
+  const slug = String(body.slug || title).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  if (!slug) throw badRequest('that title makes an empty slug - give a slug');
+  if (slug.length > 120) throw badRequest('a wiki slug is at most 120 characters');
+
+  const clash = await db.one('SELECT id, title FROM documents WHERE project_id = ? AND slug = ?', [projectId, slug]);
+  if (clash) throw conflict(`this project already has a wiki page at "${slug}" - ${clash.title}`);
+
+  const number = body.number ? String(body.number).trim() : null;
+  const text = String(body.body || '');
+  const counts = measure(text);
+
+  const id = await db.transaction(async (tx) => {
+    const newId = await tx.insert('documents', {
+      project_id: projectId, parent_id: body.parent_id || null,
+      number, slug, title, body: text,
+      status: body.status || 'DRAFT',
+      ...counts,
+      position: Number(body.position) || Number(number) || 0,
+      created_by: ctx.user.id, updated_by: ctx.user.id,
+    });
+    await notify.record({
+      projectId, ...actor(ctx), kind: 'wiki', verb: 'created a wiki page',
+      targetLabel: `${number || ''} ${title}`.trim(),
+      detail: `${counts.word_count} words, ${counts.section_count} section(s)`,
+    }, tx);
+    return newId;
+  });
+  return { id, slug, number, title, revision: 0, ...counts };
+}
+
+/**
  * Save a document.
  *
  * Optimistic concurrency on the revision number: a save against a stale base
@@ -286,8 +414,7 @@ async function saveDocument(ctx, documentId, { body, baseRevision, note = null }
   }
 
   const text = String(body || '');
-  const words = text.trim() ? text.trim().split(/\s+/).length : 0;
-  const sections = (text.match(/^#{1,6} /gm) || []).length;
+  const { word_count: words, section_count: sections } = measure(text);
 
   await db.transaction(async (tx) => {
     await tx.update('documents', documentId, {
@@ -297,7 +424,7 @@ async function saveDocument(ctx, documentId, { body, baseRevision, note = null }
       document_id: documentId, revision: current + 1, body: text, author_id: ctx.user.id, note,
     });
     await notify.record({
-      projectId: doc.project_id, actorId: ctx.user.id, kind: 'wiki', verb: 'edited the wiki',
+      projectId: doc.project_id, ...actor(ctx), kind: 'wiki', verb: 'edited the wiki',
       targetLabel: `${doc.number || ''} ${doc.title}`.trim(),
       detail: note || `revision ${current + 1} · ${words} words`,
     }, tx);
@@ -678,8 +805,8 @@ async function receiveEmail(payload) {
 }
 
 module.exports = {
-  createProject, decideInitiation, setFavourite, setHealth, takeBaseline, closeSprint,
-  moveCard, reorderBacklog, saveDocument, touchPresence, addAgendaItem, recordMinutes,
-  markRead, setPreferences, setAllocation, setStatusWeight, toggleAutomation,
+  createProject, decideInitiation, setFavourite, setHealth, createVersion, takeBaseline,
+  closeSprint, moveCard, reorderBacklog, createDocument, saveDocument, touchPresence,
+  addAgendaItem, recordMinutes, markRead, setPreferences, setAllocation, setStatusWeight, toggleAutomation,
   saveCustomField, setCustomValue, issueMcpToken, revokeMcpToken, receiveEmail,
 };
