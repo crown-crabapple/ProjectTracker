@@ -2,27 +2,40 @@
  * Typography.
  *
  * The design names Instrument Sans for prose and Archivo for every label and
- * numeral. Neither is loaded from a CDN: the server sends a strict
- * Content-Security-Policy with no external origins, and an app that reaches out
- * to a font host to render is an app that renders differently when that host is
- * down.
+ * numeral. Both are in public/fonts/ as variable woff2 files, served by this app
+ * from its own origin: the server sends a strict Content-Security-Policy whose
+ * font-src is 'self', and an app that reaches out to a font host to render is an
+ * app that renders differently when that host is down.
  *
- * So the stack degrades to the platform's own faces, in the same roles. If the
- * two families are wanted, drop the woff2 files into public/fonts/ and the
- * @font-face rules below pick them up — the src list is ordered so a missing
- * file falls through silently rather than blocking the first paint.
+ * Provenance and licence — both are SIL Open Font License 1.1, and the text with
+ * both copyright lines is public/fonts/OFL.txt beside them. Upstream is the
+ * google/fonts repository (ofl/instrumentsans, ofl/archivo). Each was subset to
+ * Latin, Latin Extended, general punctuation and currency, with every OpenType
+ * feature kept — `tnum` in particular, because --font-label exists for tabular
+ * figures and dropping the feature would have taken them away silently:
+ *
+ *   python3 -m fontTools.subset "InstrumentSans[wdth,wght].ttf" \
+ *     --unicodes="U+0000-00FF,U+0100-024F,U+0259,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0300-036F,U+1E00-1E9F,U+1EF2-1EFF,U+2000-206F,U+2074,U+20A0-20BF,U+2113,U+2122,U+2190-2193,U+2212,U+2215,U+2605,U+2C60-2C7F,U+A720-A7FF,U+FEFF,U+FFFD" \
+ *     --layout-features='*' --flavor=woff2 --output-file=InstrumentSans-Variable.woff2
+ *
+ * The variable axes are kept rather than instanced, so one file covers every
+ * weight the app asks for. The stacks below still name platform faces in the
+ * same roles, so a stripped checkout with no public/fonts/ renders in
+ * proportion rather than in Times.
  */
 
 @font-face {
   font-family: 'Instrument Sans';
   src: url('/fonts/InstrumentSans-Variable.woff2') format('woff2-variations');
+  /* The range the file actually carries on its wght axis. Declaring wider would
+     hand the browser a weight it then synthesises. */
   font-weight: 400 700;
   font-display: swap;
 }
 @font-face {
   font-family: 'Archivo';
   src: url('/fonts/Archivo-Variable.woff2') format('woff2-variations');
-  font-weight: 400 700;
+  font-weight: 100 900;
   font-display: swap;
 }
 
@@ -31,6 +44,8 @@
      equivalents in proportion; Instrument Sans wins when it is present. */
   --font-prose: 'Instrument Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   /* Every label, every number. Tabular figures are the whole point: a column of
-     right-aligned hours that jitters as the digits change is unreadable. */
+     right-aligned hours that jitters as the digits change is unreadable. The
+     fallbacks are monospaced because that is the only way to keep the property
+     when Archivo is missing. */
   --font-label: 'Archivo', 'SF Mono', 'Cascadia Mono', 'Roboto Mono', ui-monospace, monospace;
 }

@@ -180,7 +180,8 @@ src/
   http/            router, body/multipart, auth, server
   cli/tracker.js   the command line
   mcp/server.js    the MCP server
-public/           index.html, app.css, app.js, lib/, views/ — no build step
+public/           index.html, app.css, fonts.css, fonts/, app.js, lib/, views/ —
+                  no build step
 test/selftest.js
 docs/
 ```
@@ -201,7 +202,8 @@ would otherwise have to be re-derived.
 - An MCP token is stored as a sha256 hash with a four-character hint. The secret
   is shown once and is not recoverable.
 - Every response carries a strict `Content-Security-Policy` with no external
-  origins. The front end has no CDN, no external font and no inline script, so
+  origins. The front end has no CDN, no external font — Instrument Sans and
+  Archivo are served from public/fonts/ — and no inline script, so
   the policy can be strict — and a strict policy is what makes a stored comment
   body harmless. `image/svg+xml` is deliberately not in the inline-serving
   allow-list: an SVG is a document that can carry script.

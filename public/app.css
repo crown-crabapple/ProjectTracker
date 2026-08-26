@@ -753,6 +753,15 @@ tbody tr:last-child td { border-bottom: none; }
   .topbar { padding: 10px 14px; gap: 10px; }
   .searchbox input { width: 110px; }
   .topbar .chip.optional { display: none; }
+  /* Below this width the row cannot hold the breadcrumb, the search box and the
+     remaining chips at their natural widths, and a flex row that cannot shrink
+     overflows the document rather than itself — which is a horizontal scrollbar
+     on every screen, not just this one. The breadcrumb gives first: it repeats
+     the page title immediately below it. The search box gives second. The chips
+     never do, because the alert chip is how you find out something is firing. */
+  .topbar .crumb { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .searchbox { min-width: 0; }
+  .searchbox input { width: 100%; }
   .wiki { grid-template-columns: minmax(0, 1fr); }
   .wiki-rail { border-right: none; border-bottom: 1px solid var(--line); padding: 14px 10px; }
   .wiki-body { padding: 18px 16px 70px; }

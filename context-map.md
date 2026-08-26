@@ -77,6 +77,10 @@ model.
 - `public/index.html` — the shell and the script order.
 - `public/app.css` — the token set and the class vocabulary. **The colour rule is
   at the top and is load-bearing: rust is reserved.**
+- `public/fonts.css` + `public/fonts/` — Instrument Sans for prose, Archivo for
+  every label and numeral, both vendored as subset variable woff2 and served from
+  this origin because `font-src` is `'self'`. The header carries the subsetting
+  command and the licence.
 - `public/app.js` — state, routing (**the URL is the state**), the render loop.
 - `public/lib/dom.js` — `h()`. No `innerHTML` anywhere, which is why a work
   package subject containing a script tag is text in all sixteen views.
