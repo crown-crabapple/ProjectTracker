@@ -553,6 +553,28 @@ async function seedDemoPartTwo(ref, ctx) {
     });
   }
 
+  // The webhook half: the variable the shared secret is read from (never the
+  // secret), the person a delivery acts as, and two deliveries — one applied and
+  // one refused, because a receiver that only ever shows the happy case hides
+  // the panel somebody actually needs at 3am.
+  await db.run(
+    "UPDATE repositories SET hook_secret_env = 'GITHUB_WEBHOOK_SECRET', hook_actor_id = ?, "
+    + "hook_state = 'ok', hook_detail = '1 new, 1 link(s)', hook_last_at = ? WHERE id = ?",
+    [user.stephen, minutesAgo(40), repo]
+  );
+  await db.insert('git_hook_deliveries', {
+    repository_id: repo, delivery_id: 'e4f1c8ad-2b19-4d0a-9d6f-0a1b2c3d4e5f',
+    event: 'pull_request', action: 'closed', state: 'applied', signature_ok: 1,
+    items_touched: 1, links_made: 1, statuses_moved: 0,
+    reason: '0 new, 1 link(s)', payload_bytes: 21874, received_at: minutesAgo(40),
+  });
+  await db.insert('git_hook_deliveries', {
+    repository_id: repo, delivery_id: '9c2d7e10-55aa-4f3b-8c21-77d9e0f1a2b3',
+    event: 'push', action: null, state: 'rejected', signature_ok: 0,
+    reason: 'the signature did not match the secret this repository names',
+    payload_bytes: 4120, received_at: minutesAgo(120),
+  });
+
   await db.insert('git_pulls', {
     repository_id: repo, actor_id: user.stephen, actor_label: 'gitdeck', state: 'ok',
     started_at: minutesAgo(61), finished_at: minutesAgo(60),

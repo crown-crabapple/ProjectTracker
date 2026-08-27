@@ -38,8 +38,11 @@ async function deck(ctx, { projectId = null, repositoryId = null } = {}) {
   const repositories = await db.query(`
     SELECT r.id, r.project_id, r.scm, r.name, r.url, r.slug, r.api_base, r.default_branch,
            r.token_env, r.state, r.detail, r.pull_state, r.pull_detail, r.last_synced_at,
+           r.hook_secret_env, r.hook_state, r.hook_detail, r.hook_last_at,
+           u.login AS hook_actor_login, u.name AS hook_actor_name,
            p.code AS project_code, p.name AS project_name
       FROM repositories r JOIN projects p ON p.id = r.project_id
+      LEFT JOIN users u ON u.id = r.hook_actor_id
      WHERE ${where}${repositoryId ? ' AND r.id = ?' : ''}
      ORDER BY r.scm, r.name`, repositoryId ? [...params, repositoryId] : params);
 
@@ -83,6 +86,12 @@ async function deck(ctx, { projectId = null, repositoryId = null } = {}) {
       JOIN repositories r ON r.id = k.repository_id
      WHERE k.repository_id IN ${idClause.sql}
      ORDER BY k.seen_count DESC, k.last_seen_at DESC LIMIT 40`, idClause.params) : [];
+
+  const deliveries = ids.length ? await db.query(`
+    SELECT d.*, r.name AS repository FROM git_hook_deliveries d
+      JOIN repositories r ON r.id = d.repository_id
+     WHERE d.repository_id IN ${idClause.sql}
+     ORDER BY d.received_at DESC LIMIT 12`, idClause.params) : [];
 
   const pulls = ids.length ? await db.query(`
     SELECT gp.*, r.name AS repository, u.name AS actor_name FROM git_pulls gp
@@ -141,6 +150,24 @@ async function deck(ctx, { projectId = null, repositoryId = null } = {}) {
       // useful thing about a credential is whether the process can see it.
       credential_present: repo.token_env ? Boolean(process.env[repo.token_env]) : null,
       pullable: ['github', 'gitlab', 'forgejo'].includes(repo.scm),
+      // Everything a person needs to set the hook up, and nothing they should
+      // not have: the path to paste into the forge (the origin is the browser's
+      // — this process does not know what it is reached as), the NAME of the
+      // variable the shared secret is read from, and whether that variable is
+      // set. Never the secret.
+      hook: {
+        path: `/api/hooks/git/${Number(repo.id)}`,
+        secret_env: repo.hook_secret_env,
+        secret_present: repo.hook_secret_env ? Boolean(process.env[repo.hook_secret_env]) : null,
+        state: repo.hook_state,
+        detail: repo.hook_detail,
+        last: repo.hook_last_at ? ago(repo.hook_last_at) : null,
+        // Whose authority a delivery borrows. Null means deliveries mirror and
+        // move nothing, which the screen says in words rather than leaving as a
+        // blank somebody reads as "anyone".
+        actor: repo.hook_actor_name || null,
+        actor_login: repo.hook_actor_login || null,
+      },
       counts: countsFor(own),
       health,
       ci: gitdeck.ciSummary(own.filter((i) => i.kind === 'workflow_run').map((r) => ({
@@ -186,6 +213,12 @@ async function deck(ctx, { projectId = null, repositoryId = null } = {}) {
       // the point of recording both.
       actor: p.actor_label || p.actor_name || 'unknown',
       on_behalf_of: p.actor_name || null,
+    })),
+    deliveries: deliveries.map((d) => ({
+      id: Number(d.id), repository: d.repository, event: d.event, action: d.action,
+      state: d.state, reason: d.reason, signature_ok: Boolean(d.signature_ok),
+      items: Number(d.items_touched), links_made: Number(d.links_made),
+      statuses_moved: Number(d.statuses_moved), when: ago(d.received_at),
     })),
     mapping: await mappingTable(repositoryId),
     kinds: SHOWN,

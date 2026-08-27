@@ -121,6 +121,23 @@ re-made by a pull — an integration that overturns a decision every quarter of 
 hour is one nobody leaves switched on. A key that matches nothing is kept in
 `git_unmatched_keys`, not dropped.
 
+### An unsigned webhook delivery is never accepted
+
+The URL in `POST /api/hooks/git/:id` is not a secret, so the signature is the
+whole of the security. A repository with no `hook_secret_env` has no open
+endpoint; the HMAC is computed over the raw bytes before anything is parsed and
+compared in constant time; and every delivery — including every refusal, with its
+reason — keeps a row in `git_hook_deliveries`. A delivery moves a status only
+where the repository names somebody for it to act as, and then only as far as
+that person and the status workflow allow. `docs/decisions/0009`.
+
+### A pull and a webhook write through one path
+
+`src/gitdeck/mirror.js`. Hearing by asking and hearing by being told are
+different; writing it down two ways is how the two come to disagree about what a
+link means. A new way of hearing from a forge goes through `mirror.match` and
+`mirror.write`, or it is a second writer.
+
 ### A health score is not readiness
 
 `src/domain/gitdeck.js` computes repository health, CI success and mapping
@@ -218,8 +235,9 @@ node db/seed.js [--reference]           # reference data, and the demo portfolio
 node db/import-state.js FILE [--dry-run]  # merge a SeedFall tracker state file
 node src/cli/tracker.js deck              # repositories, health, CI, what is mapped
 node src/cli/tracker.js pull [--dry-run]  # fetch a repository, re-match its keys
+node src/cli/tracker.js hooks             # the webhook endpoints, and what has arrived
 npm start                               # the web server
-npm test                                # 318 checks, throwaway database
+npm test                                # 356 checks, throwaway database
 node src/cli/tracker.js help
 node src/mcp/server.js                  # stdio
 ```
@@ -243,12 +261,13 @@ Named so nobody builds them thinking they were forgotten:
 - **Real-time push.** Notifications are correct and immediate in the database;
   delivery waits for the next request. SSE is a small change and is not
   pretended to be there.
-- **A scheduler, and webhook receivers.** The forge client is real — the git deck
-  pulls GitHub, GitLab and Forgejo — but a pull only ever happens because a
-  person pressed PULL, ran `pt pull` or called the `git.pull` MCP tool. Put the
-  CLI in cron if you want it hourly. Nothing polls git, SVN, XWiki or IMAP at
-  all; those tables, displays and inbound endpoints are real and the fetchers are
-  not written.
+- **A scheduler.** The forge client is real — the git deck pulls GitHub, GitLab
+  and Forgejo, and a webhook delivers what changes as it changes — but a *pull*
+  only ever happens because a person pressed PULL, ran `pt pull` or called the
+  `git.pull` MCP tool. That matters because a delivery missed while the server
+  was down is missed for good, and reconciling is what a pull is for. Put the CLI
+  in cron. Nothing polls git, SVN, XWiki or IMAP at all; those tables, displays
+  and inbound endpoints are real and the fetchers are not written.
 - **Character-level collaborative editing.** Presence plus a refusal to merge —
   `docs/decisions/0004` has the argument, and it is the most likely thing to
   clear the dependency bar later.

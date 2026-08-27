@@ -61,7 +61,7 @@ explains itself is findable.
 | `comment.add` | **write** | A comment on a work package or a wiki page. Never internal |
 | `summary.write` | **write** | Post a generated summary to a person's My page |
 | `git.links` | read | What a work package is in the repository, asked by `WP-112` **or** by the key the repository knows it by (`F-LOAD-012`). `unmapped: true` answers the other direction: work with no forge object, and forge objects with no work package |
-| `git.deck` | read | Repositories: pull requests, issues, CI, the health score, the mapping table and how much work is connected |
+| `git.deck` | read | Repositories: pull requests, issues, CI, the health score, the mapping table, the webhook state and how much work is connected |
 | `git.pull` | **write** | Pull a repository now and re-match its keys. A write because it reaches the network on the tracker's behalf and, where a repository is configured for it, can move a status. `dry_run` writes nothing |
 
 `git.deck` and `git.links` return a health score and a CI success rate. **Neither

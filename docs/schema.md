@@ -1,6 +1,7 @@
 # The schema
 
-85 tables in `db/schema.sql` plus five added by migration `0002`, sectioned by
+85 tables in `db/schema.sql` plus five added by migration `0002` and one by
+`0003`, sectioned by
 domain, with the derivation for every non-obvious column written next to it. This
 is the map, not a repeat of the DDL.
 
@@ -46,6 +47,9 @@ These are the ones worth knowing before changing anything.
 | `work_package_git_links.removed_at` + `removed_by` | A removed link keeps its row, and a pull will never re-make that pair. Overturning a person's decision every quarter of an hour is how an integration gets switched off. |
 | `git_type_rules.merged_status_id` / `closed_status_id` | Both NULL by default, which is the decision: a pull mirrors, it does not decide. When set, the move goes through `status_transitions` like any other and is refused if the workflow refuses it. |
 | `git_unmatched_keys` | A key found in a repository that matches no work package, kept with a count. A branch named for work the tracker has never heard of is the most useful thing a pull reports. |
+| `repositories.hook_secret_env` | The NAME of the variable holding the webhook's shared secret. No secret means **no open endpoint**: an unsigned delivery is never accepted, so this column is what opens the door rather than merely improving it. |
+| `repositories.hook_actor_id` | Whose authority a delivery borrows when a status rule fires. Nobody starts a webhook, so without this a delivery mirrors and moves nothing — and says so in its own record. `docs/decisions/0009`. |
+| `git_hook_deliveries` | Every delivery, refusals included, with the reason and the (truncated) body. `delivery_id` is deliberately **not** unique: a retry is a fact, and its row records that it was ignored rather than replacing the first. |
 | `mcp_tokens.token_hash` + `token_hint` | sha256 and the last four characters. The secret is shown once at creation. |
 | `mcp_audit` | Every call, reads included. `docs/decisions/0005`. |
 | `mcp_tokens.created_by` | Who issued it, and — for a write-scoped token — whose permissions its writes run with. A token can do no more than its issuer, and one with nobody here may read and may not write. `docs/decisions/0006`. |
@@ -70,6 +74,7 @@ These are the ones worth knowing before changing anything.
 | sharing & notification | `work_package_shares`, `notifications`, `activities`, `email_intake`, `calendar_subscriptions` |
 | repositories | `repositories`, `repository_revisions`, `revision_work_packages`, `integrations` |
 | the git deck (`0002`) | `git_items`, `work_package_git_links`, `git_type_rules`, `git_unmatched_keys`, `git_pulls` |
+| webhooks (`0003`) | `git_hook_deliveries` |
 | workflow & customisation | `custom_fields`, `custom_field_projects`, `custom_field_types`, `custom_values`, `form_configurations`, `form_sections`, `form_fields`, `attribute_help_texts`, `automations`, `automation_projects`, `automation_runs`, `project_initiation_requests`, `settings` |
 | MCP | `mcp_tools`, `mcp_tokens`, `mcp_audit`, `generated_summaries`, `exports` |
 | migrations | `schema_migrations` (created by `db/migrate.js`, not by `schema.sql`) |

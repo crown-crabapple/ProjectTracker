@@ -1057,6 +1057,14 @@ const TOOLS = {
           state: r.state, pull_state: r.pull_state, last_synced: r.last_synced,
           counts: r.counts, health: r.health, ci: r.ci, digest: r.digest,
           forge_objects_mapped: `${r.coverage.items_linked}/${r.coverage.items}`,
+          // Whether the forge can reach us, and whether a delivery may move
+          // anything. Never the secret — only the name of the variable and
+          // whether it is set.
+          webhook: {
+            open: Boolean(r.hook.secret_env && r.hook.secret_present),
+            secret_env: r.hook.secret_env, state: r.hook.state, last: r.hook.last,
+            acts_as: r.hook.actor || 'nobody — deliveries mirror and move no status',
+          },
         })),
         coverage: data.coverage,
         mapping: data.mapping,

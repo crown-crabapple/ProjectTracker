@@ -36,6 +36,7 @@ const mut = require('../api/mutations');
 const mut2 = require('../api/mutations2');
 const mut3 = require('../api/mutations3');
 const pull = require('../gitdeck/pull');
+const hooks = require('../gitdeck/hooks');
 const exporters = require('../api/exports');
 
 const PUBLIC = path.join(config.root, 'public');
@@ -324,6 +325,34 @@ router.post('/api/repositories/:id/pull', async ({ req, params }) => {
   const ctx = await contextFor(req);
   const { fields } = await body.read(req);
   return pull.pullRepository(ctx, Number(params.id), { dryRun: Boolean(fields.dry_run) });
+});
+
+/**
+ * The webhook endpoint. A forge POSTs here when something changes.
+ *
+ * No session — the caller is a machine somewhere else — and the signature is
+ * what stands in for one. Every outcome is recorded as a `git_hook_deliveries`
+ * row inside `hooks.receive`, refusals included and with the reason, so a
+ * refusal is answerable from the deck rather than from a log. The status
+ * returned is the one the forge's own delivery log will show.
+ */
+router.post('/api/hooks/git/:id', async ({ req, params }) => {
+  let raw = Buffer.alloc(0);
+  let problem = null;
+  try {
+    raw = await body.raw(req, body.MAX_HOOK);
+  } catch (e) {
+    problem = e.message;
+  }
+  const result = await hooks.receive({
+    repositoryId: Number(params.id),
+    headers: req.headers,
+    raw,
+    problem,
+    remoteAddr: req.socket ? req.socket.remoteAddress : null,
+  });
+  if (result.status >= 400) throw new HttpError(result.status, result.body.error);
+  return result.body;
 });
 
 router.post('/api/repositories/:id/mapping', async ({ req, params }) => {

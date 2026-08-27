@@ -316,6 +316,60 @@ async function pureChecks() {
     'no api_base');
 
 
+  // --- the webhook receiver: verification and mapping, without a database
+  const hooks = require('../src/gitdeck/hooks');
+  const hookBody = Buffer.from(JSON.stringify({ action: 'opened' }), 'utf8');
+  const hookSecret = 'a-shared-secret';
+  const hookSig = 'sha256=' + crypto.createHmac('sha256', hookSecret).update(hookBody).digest('hex');
+  check('a GitHub signature over the raw bytes verifies',
+    hooks.verify('github', { 'x-hub-signature-256': hookSig }, hookBody, hookSecret).ok);
+  check('a signature over different bytes does not',
+    !hooks.verify('github', { 'x-hub-signature-256': hookSig }, Buffer.from('{}'), hookSecret).ok);
+  check('and neither does no signature at all',
+    !hooks.verify('github', {}, hookBody, hookSecret).ok,
+    'an unsigned delivery must never be accepted');
+  check('Forgejo sends the same digest without the prefix, and it verifies',
+    hooks.verify('forgejo', { 'x-forgejo-signature': hookSig.slice(7) }, hookBody, hookSecret).ok);
+  check('GitLab sends the secret back and it is compared in constant time',
+    hooks.verify('gitlab', { 'x-gitlab-token': hookSecret }, hookBody, hookSecret).ok
+    && !hooks.verify('gitlab', { 'x-gitlab-token': 'nearly-right' }, hookBody, hookSecret).ok);
+
+  eq('a form-encoded delivery is read the same as a JSON one',
+    hooks.parseBody('application/x-www-form-urlencoded',
+      Buffer.from('payload=' + encodeURIComponent('{"action":"opened"}'))),
+    { action: 'opened' });
+
+  const prEvent = hooks.itemsFrom('github', 'pull_request', {
+    action: 'closed',
+    pull_request: {
+      number: 978, title: 'F-LOAD-012 parse decisions', state: 'closed',
+      merged_at: '2026-08-24T09:00:00Z', head: { ref: 'feature/f-load-012' }, base: { ref: 'main' },
+      html_url: 'https://forge.invalid/pull/978', user: { login: 'stephen' }, labels: [],
+    },
+  });
+  eq('a delivered pull request normalises exactly as a fetched one does',
+    prEvent.items.map((i) => [i.kind, i.ref, i.state, i.head_branch]),
+    [['pull_request', '978', 'merged', 'feature/f-load-012']]);
+  const pushEvent = hooks.itemsFrom('github', 'push', {
+    ref: 'refs/heads/feature/f-ui-021-list',
+    commits: [{ id: 'abc123', message: 'F-UI-021 wire it', timestamp: '2026-08-25T08:00:00Z', author: { name: 'S' } }],
+  });
+  eq('a push carries its branch and its commits',
+    [pushEvent.items.map((i) => `${i.kind} ${i.ref}`), pushEvent.commits.map((c) => c.identifier)],
+    [['branch feature/f-ui-021-list'], ['abc123']]);
+  check('a tag push is not mirrored as a branch',
+    hooks.itemsFrom('github', 'push', { ref: 'refs/tags/v1.0.0', commits: [] }).items.length === 0);
+  check('an event this receiver does not know is named, not thrown',
+    hooks.itemsFrom('github', 'star', {}).unknown === 'star',
+    'a receiver that 400s on an unsubscribed event teaches people to narrow the subscription');
+  check('a GitLab merge request hook maps through the same normaliser',
+    hooks.itemsFrom('gitlab', 'Merge Request Hook', {
+      object_kind: 'merge_request',
+      object_attributes: { iid: 12, title: 'F-UI-007 rollup', state: 'merged', source_branch: 'f-ui-007', url: 'https://x/12' },
+      user: { username: 'modell' },
+    }).items[0].ref === '12');
+
+
   // --- passwords
   const hashed = passwords.hash('correct horse');
   check('the right password verifies', passwords.verify('correct horse', hashed.hash, hashed.salt));
@@ -1053,6 +1107,163 @@ async function databaseChecks(db) {
   check('and the forge was only ever reached through the stub', forgeCalls > 0);
 
 
+  // --- the webhook receiver, end to end
+  //
+  // The delivery is signed here with the same HMAC a forge would use, so what is
+  // exercised is the real path: verify the raw bytes, refuse anything that does
+  // not verify, record every outcome, and write through the pull's own mirror.
+  const hooksApi = require('../src/gitdeck/hooks');
+  const HOOK_SECRET = 'selftest-hook-secret';
+  process.env.PT_TEST_HOOK_SECRET = HOOK_SECRET;
+  const sign = (buf, secret = HOOK_SECRET) => (
+    'sha256=' + crypto.createHmac('sha256', secret).update(buf).digest('hex')
+  );
+  const deliver = (repoId, event, payload, opts = {}) => {
+    const raw = Buffer.from(JSON.stringify(payload), 'utf8');
+    return hooksApi.receive({
+      repositoryId: repoId,
+      headers: {
+        'x-github-event': event,
+        'x-github-delivery': opts.delivery || `selftest-${event}-${Math.round(payload.__n || 0)}`,
+        'x-hub-signature-256': opts.signature === null ? undefined : (opts.signature || sign(raw, opts.secret)),
+        'content-type': 'application/json',
+      },
+      raw,
+    });
+  };
+
+  const prPayload = (n, overrides = {}) => ({
+    __n: n,
+    action: overrides.action || 'closed',
+    pull_request: {
+      number: n, title: overrides.title || 'F-UI-021 filterable task list',
+      state: 'closed', merged_at: '2026-08-26T09:00:00Z',
+      user: { login: 'stephen' }, head: { ref: 'feature/f-ui-021-list' }, base: { ref: 'main' },
+      html_url: `https://forge.invalid/pull/${n}`, body: overrides.body || null, labels: [],
+      created_at: '2026-08-20T10:00:00Z', updated_at: '2026-08-26T09:00:00Z',
+      ...overrides.pull,
+    },
+  });
+
+  // Nothing is open until a repository names a secret. The demo seeds one, so
+  // it is cleared first — this is the path a freshly connected repository takes.
+  await db.run('UPDATE repositories SET hook_secret_env = NULL WHERE id = ?', [seedRepo.id]);
+  const closed = await deliver(seedRepo.id, 'pull_request', prPayload(3001));
+  eq('a repository with no hook_secret_env has no open endpoint', closed.status, 401);
+  check('and the refusal names what is missing rather than saying "forbidden"',
+    /hook_secret_env/.test(closed.body.error) && /never accepted/.test(closed.body.error),
+    closed.body.error);
+  check('and the refusal is recorded with its reason',
+    Number(await db.scalar(
+      "SELECT COUNT(*) FROM git_hook_deliveries WHERE repository_id = ? AND state = 'rejected'", [seedRepo.id]
+    )) >= 1);
+
+  await db.run("UPDATE repositories SET hook_secret_env = 'PT_TEST_MISSING_SECRET' WHERE id = ?", [seedRepo.id]);
+  const unset = await deliver(seedRepo.id, 'pull_request', prPayload(3002));
+  check('a secret variable that is not set is refused, and named',
+    unset.status === 401 && /PT_TEST_MISSING_SECRET/.test(unset.body.error), JSON.stringify(unset.body));
+
+  await db.run("UPDATE repositories SET hook_secret_env = 'PT_TEST_HOOK_SECRET' WHERE id = ?", [seedRepo.id]);
+  const wrongSig = await deliver(seedRepo.id, 'pull_request', prPayload(3003), { secret: 'not-the-secret' });
+  eq('a delivery signed with the wrong secret is refused', wrongSig.status, 401);
+  check('and nothing it carried was written',
+    Number(await db.scalar("SELECT COUNT(*) FROM git_items WHERE ref = '3003'")) === 0);
+
+  const applied = await deliver(seedRepo.id, 'pull_request', prPayload(3004), { delivery: 'd-3004' });
+  eq('a signed delivery is applied', applied.body.state, 'applied');
+  const mirrored = await db.one(
+    "SELECT kind, state, head_branch FROM git_items WHERE repository_id = ? AND ref = '3004'", [seedRepo.id]
+  );
+  eq('and the item it carried is mirrored as a merged pull request',
+    [mirrored.kind, mirrored.state], ['pull_request', 'merged']);
+  const hookLink = await db.one(`
+    SELECT l.relation, l.matched_key, l.actor_label, wp.wp_key
+      FROM work_package_git_links l
+      JOIN git_items gi ON gi.id = l.git_item_id
+      JOIN work_packages wp ON wp.id = l.work_package_id
+     WHERE gi.ref = '3004' AND gi.repository_id = ?`, [seedRepo.id]);
+  eq('and it is linked to the work package its title names, as a machine',
+    [hookLink.wp_key, hookLink.relation, hookLink.matched_key, hookLink.actor_label],
+    ['WP-121', 'implements', 'F-UI-021', 'gitdeck · webhook']);
+
+  const retry = await deliver(seedRepo.id, 'pull_request', prPayload(3004), { delivery: 'd-3004' });
+  eq('a redelivery of the same id is ignored rather than applied twice', retry.body.state, 'ignored');
+  check('and the retry keeps its own row, because a retry is a fact',
+    Number(await db.scalar(
+      'SELECT COUNT(*) FROM git_hook_deliveries WHERE repository_id = ? AND delivery_id = ?',
+      [seedRepo.id, 'd-3004']
+    )) === 2);
+
+  // A status rule, with and without somebody to act as.
+  await db.run(`
+    INSERT INTO git_type_rules (repository_id, type_id, item_kind, relation, key_prefix, merged_status_id)
+    VALUES (?, ?, 'pull_request', 'implements', 'F', ?)`, [seedRepo.id, featureType, doneStatus]);
+  await db.run('UPDATE work_packages SET status_id = ? WHERE id = 121', [buildStatus]);
+  await db.run('UPDATE repositories SET hook_actor_id = NULL WHERE id = ?', [seedRepo.id]);
+  const noActor = await deliver(seedRepo.id, 'pull_request', prPayload(3005), { delivery: 'd-3005' });
+  eq('with nobody to act as, a delivery moves no status',
+    Number(await db.scalar('SELECT status_id FROM work_packages WHERE id = 121')), Number(buildStatus));
+  check('and says so rather than reporting nothing happened',
+    noActor.body.problems.some((p) => /names nobody/.test(p)), JSON.stringify(noActor.body.problems));
+
+  await db.run('UPDATE repositories SET hook_actor_id = ? WHERE id = ?', [stephen, seedRepo.id]);
+  const withActor = await deliver(seedRepo.id, 'pull_request', prPayload(3006), { delivery: 'd-3006' });
+  eq('with an actor named, a merged pull request moves the work package it implements',
+    Number(await db.scalar('SELECT status_id FROM work_packages WHERE id = 121')), Number(doneStatus));
+  eq('and the delivery reports the move', withActor.body.moves.length, 1);
+  const hookTrail = await db.one(`
+    SELECT actor_id, actor_label FROM activities
+     WHERE work_package_id = 121 AND kind = 'status' ORDER BY id DESC LIMIT 1`);
+  check('and the trail records the webhook, not the person whose authority it borrowed',
+    hookTrail.actor_label === 'gitdeck · webhook' && hookTrail.actor_id === null,
+    JSON.stringify(hookTrail));
+
+  // A push: the branch and the commits, through the same matcher.
+  const pushRaw = {
+    ref: 'refs/heads/feature/f-load-012-decisions',
+    commits: [{
+      id: 'dd44ee55ff66', message: 'F-UI-021 wire the filter', url: 'https://forge.invalid/c/dd44',
+      timestamp: '2026-08-26T08:00:00Z', author: { name: 'Stephen' },
+    }],
+  };
+  const pushed = await deliver(seedRepo.id, 'push', pushRaw, { delivery: 'd-push' });
+  eq('a push mirrors the branch it created', pushed.body.state, 'applied');
+  check('and links the branch to the work package its name carries',
+    Boolean(await db.one(`
+      SELECT l.id FROM work_package_git_links l JOIN git_items gi ON gi.id = l.git_item_id
+       WHERE gi.kind = 'branch' AND gi.ref = 'feature/f-load-012-decisions' AND l.work_package_id = 103`)),
+    'a branch named for a feature should find it the moment it is pushed');
+  check('and links its commit to the work package its message names',
+    Number(await db.scalar(`
+      SELECT COUNT(*) FROM revision_work_packages rwp
+        JOIN repository_revisions rv ON rv.id = rwp.revision_id
+       WHERE rv.identifier = 'dd44ee55ff66'`)) === 1);
+
+  const ping = await deliver(seedRepo.id, 'ping', { zen: 'Design for failure.' }, { delivery: 'd-ping' });
+  check('a ping is answered and recorded rather than treated as an error',
+    ping.status === 200 && ping.body.state === 'ignored' && /ping/.test(ping.body.reason), JSON.stringify(ping.body));
+  const unknownEvent = await deliver(seedRepo.id, 'star', { action: 'created' }, { delivery: 'd-star' });
+  check('an event nothing is mirrored from is ignored with the event named',
+    unknownEvent.status === 200 && /star/.test(unknownEvent.body.reason), JSON.stringify(unknownEvent.body));
+
+  const unknownRepo = await hooksApi.receive({
+    repositoryId: 987654, headers: { 'x-github-event': 'ping' }, raw: Buffer.from('{}'),
+  });
+  check('a delivery to a repository that does not exist is a 404, and is still recorded',
+    unknownRepo.status === 404
+    && Number(await db.scalar('SELECT COUNT(*) FROM git_hook_deliveries WHERE repository_id IS NULL')) === 1);
+
+  await db.run('DELETE FROM git_type_rules WHERE repository_id = ?', [seedRepo.id]);
+
+  // Naming somebody who could not do it by hand is refused where it is set, not
+  // discovered at three in the morning in a delivery record.
+  await throws('a hook actor who cannot edit work packages here is refused',
+    () => mut3.updateRepository(ctx, seedRepo.id, { hook_actor: 'jlin' }), 'could never move one');
+  await throws('and a webhook secret pasted in place of a variable name is refused too',
+    () => mut3.updateRepository(ctx, seedRepo.id, { hook_secret_env: 'ghp_abcdefghijklmnopqrstuvwxyz0123' }),
+    'looks like a token');
+
+
   // --- the MCP surface
   const mcpRead = await mut2.issueMcpToken(ctx, { name: 'selftest read', scope: 'read' });
   check('an MCP token is returned once', mcpRead.secret.startsWith('pt_mcp_'));
@@ -1422,6 +1633,45 @@ async function httpChecks({ livingToken }) {
     check('an xlsx export is a zip', exportXlsx.raw.slice(0, 2).toString() === 'PK');
     const exportBad = await request('GET', '/api/export/work/docx?project=1', { cookie });
     eq('an unsupported export format is 400', exportBad.status, 400);
+
+    // The webhook endpoint, through the real server and with no cookie: a forge
+    // has no session, and the signature is what stands in for one.
+    const hookEvent = {
+      action: 'closed',
+      pull_request: {
+        number: 4100, title: 'F-UI-021 through the server', state: 'closed',
+        merged_at: '2026-08-26T09:00:00Z', user: { login: 'stephen' },
+        head: { ref: 'feature/f-ui-021-http' }, base: { ref: 'main' },
+        html_url: 'https://forge.invalid/pull/4100', body: null, labels: [],
+        created_at: '2026-08-20T10:00:00Z', updated_at: '2026-08-26T09:00:00Z',
+      },
+    };
+    const hookBytes = JSON.stringify(hookEvent);
+    const hookSignature = 'sha256=' + crypto.createHmac('sha256', 'selftest-hook-secret')
+      .update(hookBytes).digest('hex');
+    const hookOk = await request('POST', '/api/hooks/git/1', {
+      body: hookEvent,
+      headers: {
+        'x-github-event': 'pull_request',
+        'x-github-delivery': 'http-4100',
+        'x-hub-signature-256': hookSignature,
+      },
+    });
+    check('a signed webhook delivery is accepted with no session at all',
+      hookOk.status === 200 && hookOk.json.state === 'applied',
+      `${hookOk.status} ${JSON.stringify(hookOk.json)}`);
+    const hookBad = await request('POST', '/api/hooks/git/1', {
+      body: hookEvent,
+      headers: {
+        'x-github-event': 'pull_request',
+        'x-github-delivery': 'http-4101',
+        'x-hub-signature-256': 'sha256=' + '0'.repeat(64),
+      },
+    });
+    eq('and an unsigned one is 401 at the same URL', hookBad.status, 401);
+    const hookNoSig = await request('POST', '/api/hooks/git/1', { body: hookEvent });
+    check('a delivery with no signature header at all is refused too',
+      hookNoSig.status === 401 && /signature/.test(hookNoSig.json.error), JSON.stringify(hookNoSig.json));
 
     const intakeNoSecret = await request('POST', '/api/intake/email', {
       body: { from: 'x@y.invalid', to: 'tasks@seedfall.local' },

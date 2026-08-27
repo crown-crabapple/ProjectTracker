@@ -21,6 +21,7 @@
  *   pt deck [--project VW]           the repositories, and how much work is mapped
  *   pt pull [NAME] [--dry-run]      fetch a repository and re-match its keys
  *   pt links WP-112 | F-LOAD-012    what one work package is in the repository
+ *   pt hooks [--project VW]         the webhook endpoints, and what has arrived
  *   pt key WP-112 F-LOAD-012        the key the repository knows it by
  *   pt activity [--limit 20]
  *   pt export csv|xlsx|pdf [--project VW] [--out FILE]
@@ -691,6 +692,48 @@ const COMMANDS = {
     return out.join('\n');
   },
 
+  /**
+   * The webhook endpoints, and what has arrived at them.
+   *
+   * Prints the path rather than a URL: this process does not know what it is
+   * reached as from the internet, and printing a guess is how somebody pastes
+   * localhost into a forge's settings page.
+   */
+  async hooks(ctx) {
+    const project = await projectByCode(ctx, flag('project'));
+    const data = await views5.deck(ctx, { projectId: project ? Number(project.id) : null });
+    const pullable = data.repositories.filter((r) => r.pullable);
+    const out = [heading('Webhook endpoints')];
+    out.push(table(
+      ['repository', 'path', 'secret', 'acts as', 'last'],
+      pullable.map((r) => [
+        `${r.name} ${W.dim(r.project_code)}`,
+        r.hook.secret_env ? r.hook.path : W.dim('closed - no hook_secret_env'),
+        r.hook.secret_env
+          ? (r.hook.secret_present ? W.green(`${r.hook.secret_env} set`) : W.red(`${r.hook.secret_env} NOT set`))
+          : W.dim('-'),
+        r.hook.actor ? r.hook.actor : W.dim('nobody - mirrors, moves nothing'),
+        r.hook.state === 'rejected' ? W.red(r.hook.detail || 'rejected')
+          : r.hook.last ? W.dim(r.hook.last) : W.dim('nothing yet'),
+      ])
+    ));
+    if (!pullable.length) out.push(`  ${W.dim('no repository here has an API this receiver understands')}`);
+    out.push(W.dim('\n  Prefix the path with whatever the forge can reach this server as. An unsigned'));
+    out.push(W.dim('  delivery is never accepted, so a repository with no secret has no open endpoint.'));
+
+    out.push(heading('Deliveries'));
+    out.push(data.deliveries.length
+      ? table(['state', 'repository', 'event', 'what happened', 'when'], data.deliveries.map((d) => [
+        d.state === 'rejected' ? W.red(d.state) : d.state === 'applied' ? W.green(d.state) : W.dim(d.state),
+        d.repository,
+        `${d.event || '-'}${d.action ? ' ' + d.action : ''}`,
+        String(d.reason || '').slice(0, 60),
+        W.dim(d.when),
+      ]))
+      : `  ${W.dim('nothing delivered')}`);
+    return out.join('\n');
+  },
+
   /** What one work package is in the repository, both directions. */
   async links(ctx) {
     const id = await resolveWorkPackage(ctx, positional[0]);
@@ -767,6 +810,7 @@ const COMMANDS = {
       ['deck [--project VW]', 'the repositories, health, CI and how much work is mapped'],
       ['pull [NAME]', '--dry-run fetches and matches without writing'],
       ['links WP-112', 'what it is in the repository - a repository key works too'],
+      ['hooks [--project VW]', 'the webhook endpoints, the secret variable, and what has arrived'],
       ['key WP-112 F-LOAD-012', 'the key the repository knows it by; - clears it'],
       ['activity', '--limit N'],
       ['export csv|xlsx|pdf', '--project VW --out FILE'],

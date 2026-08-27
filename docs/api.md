@@ -122,6 +122,31 @@ that assembles them itself will eventually get one of those rules wrong.
 | `POST` | `/api/wp/:id/ref-key` | Set the key the repository knows this work package by — `F-LOAD-012`. Unique per project; a shape no branch could carry is refused. |
 | `POST` | `/api/wp/:id/git-links` | Link by `item_id`, or by `kind` and `ref` ("PR 978"). The item must already be in the mirror: nothing here invents a forge object it has not seen. |
 | `DELETE` | `/api/git-links/:id` | Remove a link. **The row is kept** and no pull will ever re-make that link — see `docs/decisions/0008`. |
+| `POST` | `/api/hooks/git/:id` | **No session.** A forge delivery. See below. |
+
+### The webhook endpoint
+
+`POST /api/hooks/git/:id` is what a forge is pointed at. It takes no session —
+the caller is a machine elsewhere — and the signature stands in for one:
+
+- **An unsigned delivery is never accepted.** GitHub and Forgejo sign the body
+  (`X-Hub-Signature-256`, `X-Forgejo-Signature`); GitLab sends the secret back in
+  `X-Gitlab-Token`. The HMAC is computed over the **raw bytes**, before the body
+  is parsed, and compared in constant time.
+- The secret is read from the environment variable named by
+  `repositories.hook_secret_env`. A repository that names none has **no open
+  endpoint**, and says so in the refusal.
+- Both `application/json` and GitHub's `application/x-www-form-urlencoded`
+  (`payload=…`) are read; the signature is over the form body either way.
+- Bodies are bounded at 2 MB. An oversized one is refused and recorded.
+- 200 for applied and for ignored (a `ping`, a retry, an event nothing is
+  mirrored from — each with a `reason`), 401 for anything that does not verify,
+  404 for a repository that does not exist. **Every one of those is recorded** in
+  `git_hook_deliveries` with its reason, refusals included.
+- A delivery moves a work package's status only where `repositories.hook_actor_id`
+  names somebody for it to act as, and then only as far as that person's
+  permissions and the status workflow allow. With nobody named it mirrors and
+  links, and the response says a status change was implied and not made.
 
 ## No account needed
 

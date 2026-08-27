@@ -73,7 +73,7 @@
       mappingPanel(app, data),
 
       h('div.grid.c2', [
-        h('div.stack', [repositoriesPanel(app, data), pullsPanel(data)]),
+        h('div.stack', [repositoriesPanel(app, data), deliveriesPanel(data), pullsPanel(data)]),
         h('div.stack', [itemsPanel(app, data, kind), unmatchedPanel(data)]),
       ]),
     ]);
@@ -218,6 +218,100 @@
       r.pull_detail && r.pull_state === 'error'
         ? h('div', { style: { 'font-size': '11px', color: 'var(--blocked)', 'margin-top': '5px' }, text: r.pull_detail })
         : null,
+      r.pullable ? hookLine(r) : null,
+    ]);
+  }
+
+  /**
+   * The webhook half of a repository row.
+   *
+   * The URL is built from location.origin because this server does not know what
+   * it is reached as — behind a proxy the two differ, and printing the wrong one
+   * is worse than printing none. The secret is never here: only the NAME of the
+   * variable it is read from, and whether that variable is set, which is the
+   * fact somebody setting this up actually needs.
+   */
+  function hookLine(r) {
+    const configured = Boolean(r.hook.secret_env);
+    return h('div', { style: { 'margin-top': '7px' } }, [
+      h('div', { style: { display: 'flex', gap: '6px', 'align-items': 'center', 'flex-wrap': 'wrap' } }, [
+        h('span.tag.small', {
+          style: {
+            color: !configured ? 'var(--ink-6)'
+              : r.hook.state === 'rejected' ? 'var(--blocked)'
+                : r.hook.state === 'ok' ? 'var(--ok)' : 'var(--ink-5)',
+          },
+          text: !configured ? 'NO WEBHOOK'
+            : r.hook.state === 'never' ? 'WEBHOOK — NOTHING DELIVERED YET'
+              : `WEBHOOK ${r.hook.state.toUpperCase()} ${r.hook.last || ''}`.trim(),
+        }),
+        configured ? h('span.tag.small', {
+          style: { color: r.hook.secret_present ? 'var(--ok)' : 'var(--blocked)' },
+          text: `${r.hook.secret_env} — ${r.hook.secret_present ? 'SET' : 'NOT SET'}`,
+        }) : null,
+      ]),
+      configured
+        ? h('div', {
+          style: { 'font-size': '11px', color: 'var(--ink-5)', 'margin-top': '3px', 'word-break': 'break-all' },
+          text: `${location.origin}${r.hook.path}`,
+        })
+        : h('div', {
+          style: { 'font-size': '11px', color: 'var(--ink-5)', 'margin-top': '3px' },
+          text: 'set hook_secret_env on this repository to open its endpoint — an unsigned delivery '
+            + 'is never accepted',
+        }),
+      configured
+        ? h('div', {
+          style: { 'font-size': '11px', color: 'var(--ink-5)', 'margin-top': '2px' },
+          // A blank here would read as "anyone"; it means the opposite.
+          text: r.hook.actor
+            ? `a delivery acts as ${r.hook.actor}, and can do no more than they can`
+            : 'no actor named — deliveries mirror and link, and move no status',
+        })
+        : null,
+      r.hook.detail && r.hook.state === 'rejected'
+        ? h('div', { style: { 'font-size': '11px', color: 'var(--blocked)', 'margin-top': '2px' }, text: r.hook.detail })
+        : null,
+    ]);
+  }
+
+  function deliveriesPanel(data) {
+    return h('div.panel', [
+      h('div.panel-head', [
+        h('h2', { text: 'Webhook deliveries' }),
+        h('div.spacer'),
+        h('span.panel-note', { text: 'REFUSALS ARE KEPT, WITH THE REASON' }),
+      ]),
+      h('div.panel-body.tight', [
+        data.deliveries.length
+          ? h('div.rows', data.deliveries.map((d) => h('div.row', [
+            h('span.tag.small', {
+              style: {
+                'min-width': '62px',
+                color: d.state === 'rejected' ? 'var(--blocked)'
+                  : d.state === 'applied' ? 'var(--ok)' : 'var(--ink-5)',
+              },
+              text: d.state.toUpperCase(),
+            }),
+            h('div.grow', [
+              h('div', {
+                style: { 'font-size': '12px' },
+                text: `${d.repository} · ${d.event || 'no event named'}${d.action ? ` ${d.action}` : ''}`,
+              }),
+              h('div', {
+                style: { 'font-size': '11px', color: 'var(--ink-5)' },
+                text: [
+                  d.signature_ok ? 'signature ok' : 'signature NOT verified',
+                  d.items ? `${d.items} item(s)` : null,
+                  d.statuses_moved ? `${d.statuses_moved} status(es) moved` : null,
+                  d.reason,
+                ].filter(Boolean).join(' · '),
+              }),
+            ]),
+            h('span.when', { text: d.when }),
+          ])))
+          : h('div.empty', { text: 'nothing delivered' }),
+      ]),
     ]);
   }
 

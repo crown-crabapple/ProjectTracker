@@ -160,9 +160,40 @@ Six properties are worth knowing before switching it on:
   repository hygiene and pipeline health, they never enter the portfolio's
   percentages, and every surface that shows them says so.
 
-There is **no scheduler and no webhook receiver**: a pull happens when somebody
-presses PULL, runs `pt pull`, or calls the `git.pull` MCP tool. Put the CLI in
-cron if you want it hourly. `docs/decisions/0008` has the argument for all of it.
+### Webhooks
+
+A forge can also tell the tracker as things happen, rather than waiting to be
+asked. Point it at `POST /api/hooks/git/<repository id>` — the deck shows the
+full URL, and `pt hooks` prints the path:
+
+```bash
+node src/cli/tracker.js hooks          # the endpoints, the secret variable, what has arrived
+```
+
+- **An unsigned delivery is never accepted.** The URL is not a secret — it is in
+  the forge's settings page and on the deck — so the signature is what stands
+  between the internet and somebody's plan. GitHub and Forgejo sign the body,
+  GitLab sends the secret back in a header; either way the HMAC is over the raw
+  bytes and the comparison is constant time.
+- **A repository that names no secret has no open endpoint.** Set
+  `hook_secret_env` to the NAME of an environment variable holding the shared
+  secret — the same rule as the API token, so nothing lands in the database.
+- **A delivery moves a status only where the repository names somebody for it to
+  act as** (`hook_actor_id`). Nobody starts a webhook, so a change needs somebody
+  answerable for it; it can do no more than that person could by hand, and the
+  trail records `gitdeck · webhook` instead of them. With nobody named, a delivery
+  mirrors and links and says a status change was implied and not made.
+- **Every delivery is kept with its reason, refusals included.** "The forge says
+  it delivered and the tracker shows nothing" is otherwise unanswerable. A retry
+  keeps its own row saying it was ignored.
+- Deliveries go through the puller's own write path, so a pull request that
+  arrives by webhook and the same one fetched an hour later produce the same row.
+
+There is **still no scheduler**. A webhook covers what changes; `pt pull` is what
+reconciles a repository afterwards — a delivery missed while the server was
+restarting is missed for good, and the deck's "pulled 3 days ago" is what makes
+that visible. Put the CLI in cron if you want it hourly.
+`docs/decisions/0008` and `0009` have the argument for all of it.
 
 ## The command line
 

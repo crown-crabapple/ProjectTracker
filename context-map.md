@@ -26,7 +26,8 @@ model.
   `mcp_tools` rows for the write tools, so a database seeded before them still
   offers them; `0002` adds the git deck — the mirror, the links, the per-type
   mapping and `work_packages.ref_key`, the key a repository knows a work package
-  by.
+  by; `0003` adds the webhook receiver's deliveries and the two columns that open
+  an endpoint and give it somebody to act as.
 - `db/migrate.js` — creates the database, applies the base then the migrations,
   records what ran in `schema_migrations`, and leaves **one account that can sign
   in** so the demo portfolio is optional. It only ever adds that account when
@@ -79,9 +80,14 @@ model.
   and Forgejo over the platform `fetch`, with the token read from
   `process.env[repository.token_env]` at the moment of the call. Injectable
   `fetchImpl`, which is how the selftest exercises it without a network.
-- `src/gitdeck/pull.js` — fetch, then mirror and match and write the trail in one
-  transaction, then move statuses *after* the commit through the ordinary
-  mutation. A link a person removed is never re-made.
+- `src/gitdeck/mirror.js` — **the one write path for anything a forge says.** Match,
+  write in the caller's transaction, move statuses after it commits. The puller
+  and the webhook receiver both go through it, so the two cannot disagree.
+- `src/gitdeck/pull.js` — fetch, then mirror. A link a person removed is never
+  re-made.
+- `src/gitdeck/hooks.js` — the webhook receiver: verify the HMAC over the raw
+  bytes, record the delivery whatever happens, then mirror. An unsigned delivery
+  is never accepted, and a repository that names no secret has no open endpoint.
 
 ### Read and write
 - `src/api/views.js` — bootstrap, My page, and the shared row shape.
@@ -118,8 +124,9 @@ model.
   as a machine; it calls `src/api/mutations*.js` rather than writing its own SQL.
 
 ### Checks and records
-- `test/selftest.js` — 318 checks against a throwaway database, and never against
-  the network: the forge client is exercised through a stub `fetch`.
+- `test/selftest.js` — 356 checks against a throwaway database, and never against
+  the network: the forge client is exercised through a stub `fetch`, and webhook
+  deliveries are signed in the suite with the same HMAC a forge would use.
 - `docs/decisions/` — the decisions that would otherwise be re-derived.
 - `docs/features.md` — the brief's feature list mapped to code, with the gaps
   named.
@@ -158,4 +165,8 @@ of it read from the mirror in MariaDB. The network is touched in exactly one
 place: the PULL button (or `pt pull`, or the `git.pull` MCP tool) →
 `POST /api/repositories/:id/pull` → `src/gitdeck/pull.js` →
 `src/gitdeck/client.js` → the forge. Nothing else in the app makes an outbound
-request, and nothing else writes `git_items`.
+request.
+
+The forge can also come the other way: `POST /api/hooks/git/:id` →
+`src/gitdeck/hooks.js`. Different door, same room — both end at
+`src/gitdeck/mirror.js`, which is the only thing that writes `git_items`.

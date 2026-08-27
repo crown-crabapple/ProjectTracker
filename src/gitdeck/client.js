@@ -134,6 +134,253 @@ function connectionFor(repository) {
   return { scm, provider, apiBase, slug, tokenEnv, token };
 }
 
+// ---------------------------------------------------------------- normalising
+//
+// One shape out of three forges, at module scope because the webhook receiver
+// needs exactly these functions: a delivery carries one pull request, one issue
+// or one release, and normalising it a second way in `hooks.js` would be a
+// second answer to "what state is this in".
+
+const githubItems = {
+  pulls: (rows) => rows.map((r) => ({
+    kind: 'pull_request',
+    ref: String(r.number),
+    title: text(r.title, 500),
+    state: r.merged_at ? 'merged' : r.draft && r.state === 'open' ? 'draft' : r.state,
+    author: r.user ? r.user.login : null,
+    head_branch: r.head ? r.head.ref : null,
+    base_branch: r.base ? r.base.ref : null,
+    url: r.html_url,
+    body: text(r.body, 20000),
+    labels: text((r.labels || []).map((l) => l.name).join(', '), 500),
+    opened_at: stamp(r.created_at),
+    updated_at: stamp(r.updated_at),
+    closed_at: stamp(r.closed_at),
+    merged_at: stamp(r.merged_at),
+    additions: r.additions === undefined ? null : r.additions,
+    deletions: r.deletions === undefined ? null : r.deletions,
+    comment_count: r.comments === undefined ? null : r.comments,
+  })),
+  // GitHub returns pull requests from the issues endpoint too. Keeping them
+  // would mirror every pull request twice under two kinds, and the second copy
+  // would be the one with no branch.
+  issues: (rows) => rows.filter((r) => !r.pull_request).map((r) => ({
+    kind: 'issue',
+    ref: String(r.number),
+    title: text(r.title, 500),
+    state: r.state,
+    author: r.user ? r.user.login : null,
+    url: r.html_url,
+    body: text(r.body, 20000),
+    labels: text((r.labels || []).map((l) => (typeof l === 'string' ? l : l.name)).join(', '), 500),
+    opened_at: stamp(r.created_at),
+    updated_at: stamp(r.updated_at),
+    closed_at: stamp(r.closed_at),
+    comment_count: r.comments === undefined ? null : r.comments,
+  })),
+  milestones: (rows) => rows.map((r) => ({
+    kind: 'milestone',
+    ref: String(r.number),
+    title: text(r.title, 500),
+    state: r.state,
+    url: r.html_url,
+    body: text(r.description, 20000),
+    opened_at: stamp(r.created_at),
+    updated_at: stamp(r.updated_at),
+    closed_at: stamp(r.closed_at),
+  })),
+  releases: (rows) => rows.map((r) => ({
+    kind: 'release',
+    ref: String(r.tag_name || r.name),
+    title: text(r.name || r.tag_name, 500),
+    state: r.draft ? 'draft' : r.prerelease ? 'prerelease' : 'published',
+    author: r.author ? r.author.login : null,
+    url: r.html_url,
+    body: text(r.body, 20000),
+    opened_at: stamp(r.created_at),
+    updated_at: stamp(r.published_at || r.created_at),
+  })),
+  branches: (rows) => rows.map((r) => ({
+    kind: 'branch',
+    ref: String(r.name),
+    title: text(r.name, 500),
+    state: r.protected ? 'protected' : 'open',
+    head_branch: String(r.name),
+    url: null,
+  })),
+  runs: (rows) => rows.map((r) => ({
+    kind: 'workflow_run',
+    ref: String(r.id),
+    title: text(r.name || r.display_title || 'workflow', 500),
+    state: r.status,
+    conclusion: r.conclusion,
+    author: r.actor ? r.actor.login : null,
+    head_branch: r.head_branch,
+    url: r.html_url,
+    opened_at: stamp(r.run_started_at || r.created_at),
+    updated_at: stamp(r.updated_at),
+    duration_sec: r.updated_at && (r.run_started_at || r.created_at)
+      ? Math.max(0, Math.round((Date.parse(r.updated_at) - Date.parse(r.run_started_at || r.created_at)) / 1000))
+      : null,
+  })),
+  alerts: (rows) => rows.map((r) => ({
+    kind: 'security_alert',
+    ref: String(r.number),
+    title: text(
+      r.security_advisory ? r.security_advisory.summary
+        : r.rule ? r.rule.description : 'security alert', 500
+    ),
+    state: r.state,
+    severity: r.security_advisory ? r.security_advisory.severity
+      : r.rule ? r.rule.security_severity_level || r.rule.severity : null,
+    url: r.html_url,
+    opened_at: stamp(r.created_at),
+    updated_at: stamp(r.updated_at),
+  })),
+};
+
+const gitlabItems = {
+  pulls: (rows) => rows.map((r) => ({
+    kind: 'pull_request',
+    ref: String(r.iid),
+    title: text(r.title, 500),
+    state: r.state === 'opened' ? (r.draft || r.work_in_progress ? 'draft' : 'open')
+      : r.state === 'merged' ? 'merged' : r.state,
+    author: r.author ? r.author.username : null,
+    head_branch: r.source_branch,
+    base_branch: r.target_branch,
+    url: r.web_url,
+    body: text(r.description, 20000),
+    labels: text((r.labels || []).join(', '), 500),
+    opened_at: stamp(r.created_at),
+    updated_at: stamp(r.updated_at),
+    closed_at: stamp(r.closed_at),
+    merged_at: stamp(r.merged_at),
+    comment_count: r.user_notes_count === undefined ? null : r.user_notes_count,
+  })),
+  issues: (rows) => rows.map((r) => ({
+    kind: 'issue',
+    ref: String(r.iid),
+    title: text(r.title, 500),
+    state: r.state === 'opened' ? 'open' : r.state,
+    author: r.author ? r.author.username : null,
+    url: r.web_url,
+    body: text(r.description, 20000),
+    labels: text((r.labels || []).join(', '), 500),
+    opened_at: stamp(r.created_at),
+    updated_at: stamp(r.updated_at),
+    closed_at: stamp(r.closed_at),
+    comment_count: r.user_notes_count === undefined ? null : r.user_notes_count,
+  })),
+  milestones: (rows) => rows.map((r) => ({
+    kind: 'milestone',
+    ref: String(r.iid || r.id),
+    title: text(r.title, 500),
+    state: r.state === 'active' ? 'open' : 'closed',
+    url: r.web_url,
+    body: text(r.description, 20000),
+    opened_at: stamp(r.created_at),
+    updated_at: stamp(r.updated_at),
+  })),
+  releases: (rows) => rows.map((r) => ({
+    kind: 'release',
+    ref: String(r.tag_name || r.name),
+    title: text(r.name || r.tag_name, 500),
+    state: r.upcoming_release ? 'draft' : 'published',
+    author: r.author ? r.author.username : null,
+    url: r._links ? r._links.self : null,
+    body: text(r.description, 20000),
+    opened_at: stamp(r.created_at),
+    updated_at: stamp(r.released_at || r.created_at),
+  })),
+  branches: (rows) => rows.map((r) => ({
+    kind: 'branch',
+    ref: String(r.name),
+    title: text(r.name, 500),
+    state: r.protected ? 'protected' : 'open',
+    head_branch: String(r.name),
+    url: r.web_url || null,
+  })),
+  runs: (rows) => rows.map((r) => ({
+    kind: 'workflow_run',
+    ref: String(r.id),
+    title: text(r.name || r.ref || 'pipeline', 500),
+    // GitLab's pipeline states are its own words. They are mapped to the two
+    // this app's CI summary understands — completed or not — and the original
+    // is kept in `conclusion`, because 'manual' and 'skipped' are not failures
+    // and a mapping that lost them would report a healthy pipeline as red.
+    state: ['success', 'failed', 'canceled', 'skipped'].includes(r.status) ? 'completed' : r.status,
+    conclusion: r.status === 'failed' ? 'failure' : r.status === 'canceled' ? 'cancelled' : r.status,
+    head_branch: r.ref,
+    url: r.web_url,
+    opened_at: stamp(r.created_at),
+    updated_at: stamp(r.updated_at),
+  })),
+};
+
+const forgejoItems = {
+  pulls: (rows) => rows.map((r) => ({
+    kind: 'pull_request',
+    ref: String(r.number),
+    title: text(r.title, 500),
+    state: r.merged ? 'merged' : r.state,
+    author: r.user ? r.user.login : null,
+    head_branch: r.head ? r.head.ref : null,
+    base_branch: r.base ? r.base.ref : null,
+    url: r.html_url,
+    body: text(r.body, 20000),
+    labels: text((r.labels || []).map((l) => l.name).join(', '), 500),
+    opened_at: stamp(r.created_at),
+    updated_at: stamp(r.updated_at),
+    closed_at: stamp(r.closed_at),
+    merged_at: stamp(r.merged_at),
+    comment_count: r.comments === undefined ? null : r.comments,
+  })),
+  issues: (rows) => rows.filter((r) => !r.pull_request).map((r) => ({
+    kind: 'issue',
+    ref: String(r.number),
+    title: text(r.title, 500),
+    state: r.state,
+    author: r.user ? r.user.login : null,
+    url: r.html_url,
+    body: text(r.body, 20000),
+    labels: text((r.labels || []).map((l) => l.name).join(', '), 500),
+    opened_at: stamp(r.created_at),
+    updated_at: stamp(r.updated_at),
+    closed_at: stamp(r.closed_at),
+    comment_count: r.comments === undefined ? null : r.comments,
+  })),
+  milestones: (rows) => rows.map((r) => ({
+    kind: 'milestone',
+    ref: String(r.id),
+    title: text(r.title, 500),
+    state: r.state,
+    body: text(r.description, 20000),
+    opened_at: stamp(r.created_at),
+    updated_at: stamp(r.updated_at),
+    closed_at: stamp(r.closed_at),
+  })),
+  releases: (rows) => rows.map((r) => ({
+    kind: 'release',
+    ref: String(r.tag_name || r.name),
+    title: text(r.name || r.tag_name, 500),
+    state: r.draft ? 'draft' : r.prerelease ? 'prerelease' : 'published',
+    author: r.author ? r.author.login : null,
+    url: r.html_url,
+    body: text(r.body, 20000),
+    opened_at: stamp(r.created_at),
+    updated_at: stamp(r.published_at || r.created_at),
+  })),
+  branches: (rows) => rows.map((r) => ({
+    kind: 'branch',
+    ref: String(r.name),
+    title: text(r.name, 500),
+    state: r.protected ? 'protected' : 'open',
+    head_branch: String(r.name),
+    url: null,
+  })),
+};
+
 /**
  * Create a client. `fetchImpl` defaults to the platform fetch, which is the
  * whole reason there is no HTTP dependency in package.json.
@@ -239,248 +486,6 @@ function create({ fetchImpl = globalThis.fetch, timeoutMs = 20000 } = {}) {
     }
     return null;
   }
-
-  // ------------------------------------------------------------- normalising
-
-  const githubItems = {
-    pulls: (rows) => rows.map((r) => ({
-      kind: 'pull_request',
-      ref: String(r.number),
-      title: text(r.title, 500),
-      state: r.merged_at ? 'merged' : r.draft && r.state === 'open' ? 'draft' : r.state,
-      author: r.user ? r.user.login : null,
-      head_branch: r.head ? r.head.ref : null,
-      base_branch: r.base ? r.base.ref : null,
-      url: r.html_url,
-      body: text(r.body, 20000),
-      labels: text((r.labels || []).map((l) => l.name).join(', '), 500),
-      opened_at: stamp(r.created_at),
-      updated_at: stamp(r.updated_at),
-      closed_at: stamp(r.closed_at),
-      merged_at: stamp(r.merged_at),
-      additions: r.additions === undefined ? null : r.additions,
-      deletions: r.deletions === undefined ? null : r.deletions,
-      comment_count: r.comments === undefined ? null : r.comments,
-    })),
-    // GitHub returns pull requests from the issues endpoint too. Keeping them
-    // would mirror every pull request twice under two kinds, and the second copy
-    // would be the one with no branch.
-    issues: (rows) => rows.filter((r) => !r.pull_request).map((r) => ({
-      kind: 'issue',
-      ref: String(r.number),
-      title: text(r.title, 500),
-      state: r.state,
-      author: r.user ? r.user.login : null,
-      url: r.html_url,
-      body: text(r.body, 20000),
-      labels: text((r.labels || []).map((l) => (typeof l === 'string' ? l : l.name)).join(', '), 500),
-      opened_at: stamp(r.created_at),
-      updated_at: stamp(r.updated_at),
-      closed_at: stamp(r.closed_at),
-      comment_count: r.comments === undefined ? null : r.comments,
-    })),
-    milestones: (rows) => rows.map((r) => ({
-      kind: 'milestone',
-      ref: String(r.number),
-      title: text(r.title, 500),
-      state: r.state,
-      url: r.html_url,
-      body: text(r.description, 20000),
-      opened_at: stamp(r.created_at),
-      updated_at: stamp(r.updated_at),
-      closed_at: stamp(r.closed_at),
-    })),
-    releases: (rows) => rows.map((r) => ({
-      kind: 'release',
-      ref: String(r.tag_name || r.name),
-      title: text(r.name || r.tag_name, 500),
-      state: r.draft ? 'draft' : r.prerelease ? 'prerelease' : 'published',
-      author: r.author ? r.author.login : null,
-      url: r.html_url,
-      body: text(r.body, 20000),
-      opened_at: stamp(r.created_at),
-      updated_at: stamp(r.published_at || r.created_at),
-    })),
-    branches: (rows) => rows.map((r) => ({
-      kind: 'branch',
-      ref: String(r.name),
-      title: text(r.name, 500),
-      state: r.protected ? 'protected' : 'open',
-      head_branch: String(r.name),
-      url: null,
-    })),
-    runs: (rows) => rows.map((r) => ({
-      kind: 'workflow_run',
-      ref: String(r.id),
-      title: text(r.name || r.display_title || 'workflow', 500),
-      state: r.status,
-      conclusion: r.conclusion,
-      author: r.actor ? r.actor.login : null,
-      head_branch: r.head_branch,
-      url: r.html_url,
-      opened_at: stamp(r.run_started_at || r.created_at),
-      updated_at: stamp(r.updated_at),
-      duration_sec: r.updated_at && (r.run_started_at || r.created_at)
-        ? Math.max(0, Math.round((Date.parse(r.updated_at) - Date.parse(r.run_started_at || r.created_at)) / 1000))
-        : null,
-    })),
-    alerts: (rows) => rows.map((r) => ({
-      kind: 'security_alert',
-      ref: String(r.number),
-      title: text(
-        r.security_advisory ? r.security_advisory.summary
-          : r.rule ? r.rule.description : 'security alert', 500
-      ),
-      state: r.state,
-      severity: r.security_advisory ? r.security_advisory.severity
-        : r.rule ? r.rule.security_severity_level || r.rule.severity : null,
-      url: r.html_url,
-      opened_at: stamp(r.created_at),
-      updated_at: stamp(r.updated_at),
-    })),
-  };
-
-  const gitlabItems = {
-    pulls: (rows) => rows.map((r) => ({
-      kind: 'pull_request',
-      ref: String(r.iid),
-      title: text(r.title, 500),
-      state: r.state === 'opened' ? (r.draft || r.work_in_progress ? 'draft' : 'open')
-        : r.state === 'merged' ? 'merged' : r.state,
-      author: r.author ? r.author.username : null,
-      head_branch: r.source_branch,
-      base_branch: r.target_branch,
-      url: r.web_url,
-      body: text(r.description, 20000),
-      labels: text((r.labels || []).join(', '), 500),
-      opened_at: stamp(r.created_at),
-      updated_at: stamp(r.updated_at),
-      closed_at: stamp(r.closed_at),
-      merged_at: stamp(r.merged_at),
-      comment_count: r.user_notes_count === undefined ? null : r.user_notes_count,
-    })),
-    issues: (rows) => rows.map((r) => ({
-      kind: 'issue',
-      ref: String(r.iid),
-      title: text(r.title, 500),
-      state: r.state === 'opened' ? 'open' : r.state,
-      author: r.author ? r.author.username : null,
-      url: r.web_url,
-      body: text(r.description, 20000),
-      labels: text((r.labels || []).join(', '), 500),
-      opened_at: stamp(r.created_at),
-      updated_at: stamp(r.updated_at),
-      closed_at: stamp(r.closed_at),
-      comment_count: r.user_notes_count === undefined ? null : r.user_notes_count,
-    })),
-    milestones: (rows) => rows.map((r) => ({
-      kind: 'milestone',
-      ref: String(r.iid || r.id),
-      title: text(r.title, 500),
-      state: r.state === 'active' ? 'open' : 'closed',
-      url: r.web_url,
-      body: text(r.description, 20000),
-      opened_at: stamp(r.created_at),
-      updated_at: stamp(r.updated_at),
-    })),
-    releases: (rows) => rows.map((r) => ({
-      kind: 'release',
-      ref: String(r.tag_name || r.name),
-      title: text(r.name || r.tag_name, 500),
-      state: r.upcoming_release ? 'draft' : 'published',
-      author: r.author ? r.author.username : null,
-      url: r._links ? r._links.self : null,
-      body: text(r.description, 20000),
-      opened_at: stamp(r.created_at),
-      updated_at: stamp(r.released_at || r.created_at),
-    })),
-    branches: (rows) => rows.map((r) => ({
-      kind: 'branch',
-      ref: String(r.name),
-      title: text(r.name, 500),
-      state: r.protected ? 'protected' : 'open',
-      head_branch: String(r.name),
-      url: r.web_url || null,
-    })),
-    runs: (rows) => rows.map((r) => ({
-      kind: 'workflow_run',
-      ref: String(r.id),
-      title: text(r.name || r.ref || 'pipeline', 500),
-      // GitLab's pipeline states are its own words. They are mapped to the two
-      // this app's CI summary understands — completed or not — and the original
-      // is kept in `conclusion`, because 'manual' and 'skipped' are not failures
-      // and a mapping that lost them would report a healthy pipeline as red.
-      state: ['success', 'failed', 'canceled', 'skipped'].includes(r.status) ? 'completed' : r.status,
-      conclusion: r.status === 'failed' ? 'failure' : r.status === 'canceled' ? 'cancelled' : r.status,
-      head_branch: r.ref,
-      url: r.web_url,
-      opened_at: stamp(r.created_at),
-      updated_at: stamp(r.updated_at),
-    })),
-  };
-
-  const forgejoItems = {
-    pulls: (rows) => rows.map((r) => ({
-      kind: 'pull_request',
-      ref: String(r.number),
-      title: text(r.title, 500),
-      state: r.merged ? 'merged' : r.state,
-      author: r.user ? r.user.login : null,
-      head_branch: r.head ? r.head.ref : null,
-      base_branch: r.base ? r.base.ref : null,
-      url: r.html_url,
-      body: text(r.body, 20000),
-      labels: text((r.labels || []).map((l) => l.name).join(', '), 500),
-      opened_at: stamp(r.created_at),
-      updated_at: stamp(r.updated_at),
-      closed_at: stamp(r.closed_at),
-      merged_at: stamp(r.merged_at),
-      comment_count: r.comments === undefined ? null : r.comments,
-    })),
-    issues: (rows) => rows.filter((r) => !r.pull_request).map((r) => ({
-      kind: 'issue',
-      ref: String(r.number),
-      title: text(r.title, 500),
-      state: r.state,
-      author: r.user ? r.user.login : null,
-      url: r.html_url,
-      body: text(r.body, 20000),
-      labels: text((r.labels || []).map((l) => l.name).join(', '), 500),
-      opened_at: stamp(r.created_at),
-      updated_at: stamp(r.updated_at),
-      closed_at: stamp(r.closed_at),
-      comment_count: r.comments === undefined ? null : r.comments,
-    })),
-    milestones: (rows) => rows.map((r) => ({
-      kind: 'milestone',
-      ref: String(r.id),
-      title: text(r.title, 500),
-      state: r.state,
-      body: text(r.description, 20000),
-      opened_at: stamp(r.created_at),
-      updated_at: stamp(r.updated_at),
-      closed_at: stamp(r.closed_at),
-    })),
-    releases: (rows) => rows.map((r) => ({
-      kind: 'release',
-      ref: String(r.tag_name || r.name),
-      title: text(r.name || r.tag_name, 500),
-      state: r.draft ? 'draft' : r.prerelease ? 'prerelease' : 'published',
-      author: r.author ? r.author.login : null,
-      url: r.html_url,
-      body: text(r.body, 20000),
-      opened_at: stamp(r.created_at),
-      updated_at: stamp(r.published_at || r.created_at),
-    })),
-    branches: (rows) => rows.map((r) => ({
-      kind: 'branch',
-      ref: String(r.name),
-      title: text(r.name, 500),
-      state: r.protected ? 'protected' : 'open',
-      head_branch: String(r.name),
-      url: null,
-    })),
-  };
 
   /**
    * Everything one pull needs, normalised.
@@ -595,4 +600,9 @@ function create({ fetchImpl = globalThis.fetch, timeoutMs = 20000 } = {}) {
   return { request, paginate, fetchRepository, checkRepository };
 }
 
-module.exports = { create, connectionFor, slugFromUrl, stamp, ForgeError, PROVIDERS };
+module.exports = {
+  create, connectionFor, slugFromUrl, stamp, text, ForgeError, PROVIDERS,
+  // The per-forge normalisers, so the webhook receiver maps a delivered object
+  // with the same code a pull maps a fetched one.
+  NORMALISERS: { github: githubItems, gitlab: gitlabItems, forgejo: forgejoItems },
+};

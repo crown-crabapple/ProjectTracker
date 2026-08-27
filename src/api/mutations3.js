@@ -78,6 +78,7 @@ async function createRepository(ctx, input) {
 
   const tokenEnv = input.token_env ? String(input.token_env).trim() : null;
   if (tokenEnv) assertVariableName(tokenEnv);
+  if (input.hook_secret_env) assertVariableName(String(input.hook_secret_env).trim());
 
   const slug = input.slug ? String(input.slug).trim() : client.slugFromUrl(url);
   const apiBase = input.api_base ? String(input.api_base).trim() : null;
@@ -90,6 +91,7 @@ async function createRepository(ctx, input) {
       project_id: projectId, scm, name, url, slug, api_base: apiBase,
       default_branch: input.default_branch ? String(input.default_branch).trim() : null,
       token_env: tokenEnv,
+      hook_secret_env: input.hook_secret_env ? String(input.hook_secret_env).trim() : null,
       state: 'off', pull_state: 'never',
       detail: 'connected, never pulled',
     });
@@ -102,7 +104,18 @@ async function createRepository(ctx, input) {
   return { id, name, scm, slug };
 }
 
-/** Change where a repository is, or which variable its token comes from. */
+/**
+ * Change where a repository is, which variables its secrets come from, and who
+ * a webhook delivery acts as.
+ *
+ * `hook_actor` is the sharp one. Nobody starts a webhook, so a delivery that is
+ * ever to move a work package has to borrow somebody's authority — the same
+ * argument as an MCP token's issuer in `docs/decisions/0006`. It is checked here
+ * rather than at delivery time: naming somebody who cannot edit work packages
+ * in this project would produce a webhook that silently refused every status
+ * change it implied, at three in the morning, with the reason in a table nobody
+ * was looking at.
+ */
 async function updateRepository(ctx, id, patch) {
   const repo = await db.one('SELECT * FROM repositories WHERE id = ?', [id]);
   if (!repo) throw notFound('no such repository');
@@ -112,10 +125,31 @@ async function updateRepository(ctx, id, patch) {
   for (const field of ['name', 'url', 'slug', 'api_base', 'default_branch']) {
     if (patch[field] !== undefined) changes[field] = patch[field] === '' ? null : String(patch[field]).trim();
   }
-  if (patch.token_env !== undefined) {
-    const value = patch.token_env === '' || patch.token_env === null ? null : String(patch.token_env).trim();
+  for (const field of ['token_env', 'hook_secret_env']) {
+    if (patch[field] === undefined) continue;
+    const value = patch[field] === '' || patch[field] === null ? null : String(patch[field]).trim();
     if (value) assertVariableName(value);
-    changes.token_env = value;
+    changes[field] = value;
+  }
+  if (patch.hook_actor !== undefined) {
+    const login = patch.hook_actor === '' || patch.hook_actor === null ? null : String(patch.hook_actor).trim();
+    if (!login) {
+      changes.hook_actor_id = null;
+    } else {
+      const user = await db.one(
+        "SELECT id, name FROM users WHERE login = ? AND active = 1 AND kind = 'user'", [login]
+      );
+      if (!user) throw badRequest(`no active account with the login "${login}"`);
+      const held = await access.permissionsFor(user.id, repo.project_id);
+      if (!held.has('edit_work_packages') && !held.has('edit_own_work_packages')) {
+        throw badRequest(
+          `${user.name} cannot edit work packages in this project, so a delivery running as them `
+          + 'could never move one. Name somebody who can, or leave it empty and the webhook will '
+          + 'mirror without moving anything.'
+        );
+      }
+      changes.hook_actor_id = user.id;
+    }
   }
   if (!Object.keys(changes).length) throw badRequest('nothing to change');
 
