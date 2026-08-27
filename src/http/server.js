@@ -31,8 +31,15 @@ const views = require('../api/views');
 const views2 = require('../api/views2');
 const views3 = require('../api/views3');
 const views4 = require('../api/views4');
+const views5 = require('../api/views5');
+const views6 = require('../api/views6');
+const views7 = require('../api/views7');
 const mut = require('../api/mutations');
 const mut2 = require('../api/mutations2');
+const mut3 = require('../api/mutations3');
+const mut4 = require('../api/mutations4');
+const pull = require('../gitdeck/pull');
+const hooks = require('../gitdeck/hooks');
 const exporters = require('../api/exports');
 
 const PUBLIC = path.join(config.root, 'public');
@@ -203,6 +210,23 @@ router.get('/api/wiki', async ({ req, url }) => {
   return views4.wiki(ctx, { projectId, slug: url.searchParams.get('doc') });
 });
 
+router.get('/api/decisions', async ({ req, url }) => {
+  const ctx = await contextFor(req);
+  const projectId = url.searchParams.get('project')
+    ? await scopeProject(ctx, url.searchParams.get('project')) : null;
+  return views6.decisions(ctx, { projectId, ref: url.searchParams.get('decision') });
+});
+
+router.get('/api/map', async ({ req, url }) => {
+  const ctx = await contextFor(req);
+  // The map is drawn for one project, so the project is required rather than
+  // defaulted: a portfolio-wide map is a different picture and `#/portfolio`
+  // and `#/roadmap` already draw it.
+  const projectId = url.searchParams.get('project')
+    ? await scopeProject(ctx, url.searchParams.get('project')) : null;
+  return views7.map(ctx, { projectId, group: url.searchParams.get('group') || 'none' });
+});
+
 router.get('/api/meetings', async ({ req, url }) => {
   const ctx = await contextFor(req);
   const projectId = url.searchParams.get('project')
@@ -222,11 +246,28 @@ router.get('/api/admin', async ({ req, url }) => {
   return views4.admin(ctx, { tab: url.searchParams.get('tab') || 'fields' });
 });
 
+router.get('/api/deck', async ({ req, url }) => {
+  const ctx = await contextFor(req);
+  const projectId = url.searchParams.get('project')
+    ? await scopeProject(ctx, url.searchParams.get('project')) : null;
+  return views5.deck(ctx, {
+    projectId,
+    repositoryId: url.searchParams.get('repo') ? Number(url.searchParams.get('repo')) : null,
+  });
+});
+
 router.get('/api/wp/:id', async ({ req, params }) => {
   const ctx = await contextFor(req);
   const wp = await query.byId(Number(params.id));
   if (!wp || !ctx.visibleProjectIds.includes(Number(wp.project_id))) throw notFound('no such work package');
   return views4.drawer(ctx, Number(params.id));
+});
+
+router.get('/api/wp/:id/git', async ({ req, params }) => {
+  const ctx = await contextFor(req);
+  const wp = await query.byId(Number(params.id));
+  if (!wp || !ctx.visibleProjectIds.includes(Number(wp.project_id))) throw notFound('no such work package');
+  return views5.workPackageGit(ctx, Number(params.id));
 });
 
 // ----------------------------------------------------------------- write routes
@@ -281,6 +322,116 @@ router.post('/api/wp/:id/share', async ({ req, params }) => {
 router.delete('/api/shares/:id', async ({ req, params }) => {
   const ctx = await contextFor(req);
   return mut.revokeShare(ctx, Number(params.id));
+});
+
+// --------------------------------------------------------------- the git deck
+
+router.post('/api/repositories', async ({ req }) => {
+  const ctx = await contextFor(req);
+  const { fields } = await body.read(req);
+  return mut3.createRepository(ctx, fields);
+});
+
+router.patch('/api/repositories/:id', async ({ req, params }) => {
+  const ctx = await contextFor(req);
+  const { fields } = await body.read(req);
+  return mut3.updateRepository(ctx, Number(params.id), fields);
+});
+
+// The only route in this file that reaches the network. It can take as long as
+// the forge takes, which is why nothing else waits on it: the deck reads the
+// mirror, and the mirror is only ever changed here.
+router.post('/api/repositories/:id/pull', async ({ req, params }) => {
+  const ctx = await contextFor(req);
+  const { fields } = await body.read(req);
+  return pull.pullRepository(ctx, Number(params.id), { dryRun: Boolean(fields.dry_run) });
+});
+
+/**
+ * The webhook endpoint. A forge POSTs here when something changes.
+ *
+ * No session — the caller is a machine somewhere else — and the signature is
+ * what stands in for one. Every outcome is recorded as a `git_hook_deliveries`
+ * row inside `hooks.receive`, refusals included and with the reason, so a
+ * refusal is answerable from the deck rather than from a log. The status
+ * returned is the one the forge's own delivery log will show.
+ */
+router.post('/api/hooks/git/:id', async ({ req, params }) => {
+  let raw = Buffer.alloc(0);
+  let problem = null;
+  try {
+    raw = await body.raw(req, body.MAX_HOOK);
+  } catch (e) {
+    problem = e.message;
+  }
+  const result = await hooks.receive({
+    repositoryId: Number(params.id),
+    headers: req.headers,
+    raw,
+    problem,
+    remoteAddr: req.socket ? req.socket.remoteAddress : null,
+  });
+  if (result.status >= 400) throw new HttpError(result.status, result.body.error);
+  return result.body;
+});
+
+router.post('/api/repositories/:id/mapping', async ({ req, params }) => {
+  const ctx = await contextFor(req);
+  const { fields } = await body.read(req);
+  return mut3.setTypeRule(ctx, Number(params.id), fields);
+});
+
+router.post('/api/wp/:id/ref-key', async ({ req, params }) => {
+  const ctx = await contextFor(req);
+  const { fields } = await body.read(req);
+  return mut3.setRefKey(ctx, Number(params.id), fields.ref_key === undefined ? null : fields.ref_key);
+});
+
+router.post('/api/wp/:id/git-links', async ({ req, params }) => {
+  const ctx = await contextFor(req);
+  const { fields } = await body.read(req);
+  return mut3.linkWorkPackage(ctx, Number(params.id), fields);
+});
+
+router.delete('/api/git-links/:id', async ({ req, params }) => {
+  const ctx = await contextFor(req);
+  return mut3.unlinkWorkPackage(ctx, Number(params.id));
+});
+
+// ------------------------------------------------------------------ decisions
+
+router.post('/api/decisions', async ({ req }) => {
+  const ctx = await contextFor(req);
+  const { fields } = await body.read(req);
+  return mut4.createDecision(ctx, fields);
+});
+
+router.patch('/api/decisions/:id', async ({ req, params }) => {
+  const ctx = await contextFor(req);
+  const { fields } = await body.read(req);
+  return mut4.updateDecision(ctx, Number(params.id), fields);
+});
+
+router.post('/api/decisions/:id/work', async ({ req, params }) => {
+  const ctx = await contextFor(req);
+  const { fields } = await body.read(req);
+  return mut4.linkWork(ctx, Number(params.id), fields);
+});
+
+router.delete('/api/decisions/:id/work/:wpId', async ({ req, params }) => {
+  const ctx = await contextFor(req);
+  return mut4.unlinkWork(ctx, Number(params.id), Number(params.wpId));
+});
+
+router.post('/api/decisions/:id/depends', async ({ req, params }) => {
+  const ctx = await contextFor(req);
+  const { fields } = await body.read(req);
+  return mut4.addDependency(ctx, Number(params.id), fields);
+});
+
+router.delete('/api/decisions/:id/depends/:otherId', async ({ req, params }) => {
+  const ctx = await contextFor(req);
+  return mut4.removeDependency(ctx, Number(params.id), Number(params.otherId));
 });
 
 router.post('/api/projects', async ({ req }) => {

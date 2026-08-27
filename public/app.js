@@ -32,7 +32,10 @@
     planner: global.viewPlanner,
     activity: global.viewActivity,
     wiki: global.viewWiki,
+    decisions: global.viewDecisions,
+    map: global.viewMap,
     meetings: global.viewMeetings,
+    deck: global.viewDeck,
     connect: global.viewConnect,
     admin: global.viewAdmin,
   };
@@ -52,7 +55,10 @@
     planner: ['weeks', 'from'],
     activity: [],
     wiki: ['project', 'doc'],
+    decisions: ['project', 'decision'],
+    map: ['project', 'view', 'group', 'expand'],
     meetings: ['project', 'meeting'],
+    deck: ['project', 'repo', 'kind'],
     connect: [],
     admin: ['tab'],
   };

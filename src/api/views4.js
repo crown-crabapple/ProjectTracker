@@ -27,6 +27,10 @@ async function wiki(ctx, { projectId = null, slug = null } = {}) {
              WHERE pr.document_id = d.id AND pr.last_seen > DATE_SUB(NOW(), INTERVAL 5 MINUTE)) AS editing
       FROM documents d LEFT JOIN projects p ON p.id = d.project_id
      WHERE ${where}
+       -- This page's content is now a decision record: showing it in both the
+       -- wiki index and on #/decisions is how the two come to disagree about
+       -- what a decision means.
+       AND NOT EXISTS (SELECT 1 FROM decisions x WHERE x.document_id = d.id)
      ORDER BY d.position, d.number, d.title`, params);
 
   const current = slug
@@ -207,6 +211,14 @@ async function connect(ctx) {
       id: r.id, scm: r.scm, name: r.name, url: r.url, state: r.state, detail: r.detail,
       default_branch: r.default_branch, project_code: r.project_code,
       revisions: Number(r.revisions), last_synced_at: r.last_synced_at,
+      // Whether this one can actually be fetched, and whether it ever has been.
+      // The connections page is where somebody asks "is this connected", and
+      // 'connected' on a row nothing has ever pulled answers a different
+      // question. The deck at #/deck is where the contents are.
+      pullable: ['github', 'gitlab', 'forgejo'].includes(r.scm),
+      pull_state: r.pull_state,
+      pull_detail: r.pull_detail,
+      last_synced: r.last_synced_at ? ago(r.last_synced_at) : 'never pulled',
       credential: r.token_env ? `read from $${r.token_env}` : 'no credential needed',
       credential_present: r.token_env ? Boolean(process.env[r.token_env]) : null,
     })),

@@ -43,6 +43,7 @@ const PERMISSIONS = [
   ['archive_project', 'project', 'Archive or unarchive'],
   ['delete_project', 'project', 'Delete a project and its work'],
   ['sign_gate', 'project', 'Record a phase gate as met'],
+  ['record_decisions', 'project', 'Raise a decision and record its answer'],
   ['manage_members', 'project', 'Add and remove members and roles'],
   ['view_work_packages', 'work', 'See work packages'],
   ['add_work_packages', 'work', 'Create work packages'],
@@ -81,14 +82,14 @@ const ROLES = [
     'view_project', 'edit_project', 'manage_members', 'view_work_packages', 'add_work_packages',
     'edit_work_packages', 'edit_own_work_packages', 'assign_work_packages', 'manage_relations',
     'set_baseline', 'manage_versions', 'manage_sprints', 'manage_boards', 'comment',
-    'comment_internal', 'manage_attachments', 'edit_wiki', 'manage_meetings', 'manage_news',
+    'comment_internal', 'manage_attachments', 'edit_wiki', 'record_decisions', 'manage_meetings', 'manage_news',
     'post_forum', 'moderate_forum', 'log_time', 'view_time', 'manage_allocations',
     'share_work_packages', 'export_data',
   ]],
   ['Contributor', 1, 3, 'Own work packages, comment, attach files', [
     'view_project', 'view_work_packages', 'add_work_packages', 'edit_own_work_packages',
     'comment', 'manage_attachments', 'post_forum', 'log_time', 'export_data', 'edit_wiki',
-    'comment_internal', 'view_time', 'manage_relations',
+    'record_decisions', 'comment_internal', 'view_time', 'manage_relations',
   ]],
   ['Reader', 1, 4, 'Read and subscribe; no internal comments', [
     'view_project', 'view_work_packages', 'export_data',
@@ -131,18 +132,39 @@ const PRIORITIES = [
   ['immediate', 'IMMEDIATE', '#d2705f', 4, 0],
 ];
 
-// [name, colour, is_milestone, is_parent_ok, subject_pattern, position]
+// [name, colour, is_milestone, is_parent_ok, subject_pattern, position,
+//  git_item_kind, git_relation, git_key_prefix]
 //
 // Only BUG carries a subject pattern, and it is the one type where a generated
 // subject is genuinely better than a typed one: a bug's subject is almost always
 // "the thing that broke, where". Everything else is typed by a person.
+//
+// The last three columns are what the type means in a repository, and they are
+// the default for every repository — `git_type_rules` overrides them per
+// repository. The choices:
+//
+//   PHASE      a forge milestone. It is the only grouping object a forge has
+//              that spans issues and pull requests, which is what a phase is.
+//   EPIC       a tracking issue. An epic is a conversation with a checklist,
+//              and that is an issue, not a milestone.
+//   FEATURE    a pull request. This is the case the mapping was asked for:
+//              F-LOAD-012 is the feature, PR #978 is the change that implements
+//              it, and neither is the other.
+//   TASK       an issue it implements. BUG an issue it fixes — the same object,
+//              a different claim, and 'what fixed this' is the question a bug is
+//              asked.
+//   MILESTONE  a release. A milestone in this tracker is a date something is
+//              true by, and a release is the forge saying it now is.
+//
+// The prefix is the letter a key of that type starts with, which is the SeedFall
+// convention this tracker inherited: F-LOAD-012 is a FEATURE in the LOAD area.
 const TYPES = [
-  ['PHASE', 'rgba(230,228,223,.4)', 0, 1, null, 1],
-  ['EPIC', 'rgba(230,228,223,.4)', 0, 1, null, 2],
-  ['FEATURE', 'rgba(230,228,223,.4)', 0, 1, null, 3],
-  ['TASK', 'rgba(230,228,223,.4)', 0, 1, null, 4],
-  ['BUG', '#d2705f', 0, 0, '{{custom.Domain}} — {{subject}}', 5],
-  ['MILESTONE', '#5fb8c8', 1, 0, null, 6],
+  ['PHASE', 'rgba(230,228,223,.4)', 0, 1, null, 1, 'milestone', 'tracks', 'PH'],
+  ['EPIC', 'rgba(230,228,223,.4)', 0, 1, null, 2, 'issue', 'tracks', 'E'],
+  ['FEATURE', 'rgba(230,228,223,.4)', 0, 1, null, 3, 'pull_request', 'implements', 'F'],
+  ['TASK', 'rgba(230,228,223,.4)', 0, 1, null, 4, 'issue', 'implements', 'T'],
+  ['BUG', '#d2705f', 0, 0, '{{custom.Domain}} — {{subject}}', 5, 'issue', 'fixes', 'B'],
+  ['MILESTONE', '#5fb8c8', 1, 0, null, 6, 'release', 'releases', 'M'],
 ];
 
 // The form configuration the theme page shows. A MILESTONE form has no
@@ -262,9 +284,12 @@ async function seedReference() {
     ids.priorities[code] = await upsert('priorities', { code, label, colour, position, is_default }, ['code']);
   }
 
-  for (const [name, colour, is_milestone, is_parent_ok, subject_pattern, position] of TYPES) {
-    ids.types[name] = await upsert('work_package_types',
-      { name, colour, is_milestone, is_parent_ok, subject_pattern, position }, ['name']);
+  for (const [name, colour, is_milestone, is_parent_ok, subject_pattern, position,
+    git_item_kind, git_relation, git_key_prefix] of TYPES) {
+    ids.types[name] = await upsert('work_package_types', {
+      name, colour, is_milestone, is_parent_ok, subject_pattern, position,
+      git_item_kind, git_relation, git_key_prefix,
+    }, ['name']);
   }
 
   ids.workWeeks['Mon–Fri'] = await upsert('work_weeks', {

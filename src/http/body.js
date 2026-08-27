@@ -16,6 +16,11 @@ const { badRequest } = require('./router');
 
 const MAX_JSON = 1024 * 1024;             // 1 MB
 const MAX_UPLOAD = 32 * 1024 * 1024;      // 32 MB per request
+// A webhook body is bigger than a form and much smaller than an upload: a push
+// to a busy repository carries its whole commit list. Generous enough for that,
+// bounded because this endpoint takes bytes from anybody who can reach it and
+// the signature can only be checked once they have all arrived.
+const MAX_HOOK = 2 * 1024 * 1024;         // 2 MB
 
 function readRaw(req, limit) {
   return new Promise((resolve, reject) => {
@@ -131,4 +136,11 @@ async function read(req) {
   return { fields: await json(req), files: [], kind: 'json' };
 }
 
-module.exports = { read, json, form, multipart, boundaryOf, MAX_JSON, MAX_UPLOAD };
+module.exports = {
+  read, json, form, multipart, boundaryOf,
+  // The bytes as they arrived. Only the webhook receiver wants these: a
+  // signature is over what was sent, and re-serialising the parsed JSON to hash
+  // it is the classic way to build a check that passes for the wrong body.
+  raw: readRaw,
+  MAX_JSON, MAX_UPLOAD, MAX_HOOK,
+};

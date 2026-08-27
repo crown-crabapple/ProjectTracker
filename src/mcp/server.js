@@ -57,8 +57,11 @@ const notify = require('../domain/notify');
 // the commit — and the two would drift.
 const mutations = require('../api/mutations');
 const mutations2 = require('../api/mutations2');
+const views5 = require('../api/views5');
+const gitPull = require('../gitdeck/pull');
 
 const PROTOCOL_VERSION = '2024-11-05';
+const today = () => new Date().toISOString().slice(0, 10);
 const SERVER_INFO = { name: 'projecttracker', version: '0.1.0' };
 
 /** Resolved once at startup from PT_MCP_TOKEN. */
@@ -162,6 +165,29 @@ async function workPackageInScope(key) {
   const ids = await scopedProjectIds();
   if (!ids.includes(Number(wp.project_id))) throw new Error(`${wp.wp_key} is not in this token's scope`);
   return wp;
+}
+
+/**
+ * 'WP-112', or the key the repository knows it by — 'F-LOAD-012'.
+ *
+ * The second form exists because an assistant reading a pull request has the
+ * repository's key and not the tracker's, and making it look the number up
+ * first is the friction the mapping was built to remove.
+ */
+async function workPackageByAnyKey(key, ids) {
+  const raw = String(key || '').trim();
+  if (!raw) throw new Error('which work package? give WP-112, or a repository key such as F-LOAD-012');
+  if (/^(?:WP-)?\d+$/i.test(raw)) return workPackageInScope(raw);
+  const clause = db.inClause(ids.length ? ids : [0]);
+  const rows = await db.query(
+    `SELECT id, wp_key, project_id FROM work_packages WHERE ref_key = ? AND project_id IN ${clause.sql}`,
+    [raw.toUpperCase(), ...clause.params]
+  );
+  if (!rows.length) throw new Error(`no work package keyed "${raw}" in this token's scope`);
+  if (rows.length > 1) {
+    throw new Error(`"${raw}" is the key of ${rows.length} work packages - name the WP- key instead`);
+  }
+  return { id: Number(rows[0].id), wp_key: rows[0].wp_key, project_id: Number(rows[0].project_id) };
 }
 
 /** A wiki document by number or slug, refused unless the token can see it. */
@@ -947,6 +973,143 @@ const TOOLS = {
         return newId;
       });
       return { id, scope, superseded_previous: true };
+    },
+  },
+
+  // ------------------------------------------------------------- the git deck
+
+  'git.links': {
+    mode: 'read',
+    description:
+      'What a work package is in the repository, and what the repository has that belongs to no work '
+      + 'package. Ask it by the tracker key (WP-112) or by the key the repository knows it by '
+      + '(F-LOAD-012). Every link says how it came to exist — the key that matched and where it was '
+      + 'found, or that a person made it by hand — because a link that cannot say why it exists is a '
+      + 'link nobody should act on.',
+    schema: {
+      type: 'object',
+      properties: {
+        key: { type: 'string', description: 'WP-112, or a repository key such as F-LOAD-012.' },
+        project: { type: 'string', description: 'Project code, when asking for the unmapped lists instead.' },
+        unmapped: {
+          type: 'boolean',
+          description: 'Instead of one work package: the work with no forge object, and the forge '
+            + 'objects with no work package.',
+        },
+      },
+      additionalProperties: false,
+    },
+    async run(args) {
+      const ids = await scopedProjectIds();
+      const ctx = { user: { id: null }, visibleProjectIds: ids, today: today() };
+      if (args.unmapped) {
+        const project = args.project ? await projectInScope(args.project) : null;
+        const data = await views5.deck(ctx, { projectId: project ? Number(project.id) : null });
+        const unmappedItems = data.items.filter((i) => !i.links.length
+          && ['pull_request', 'issue', 'milestone', 'release'].includes(i.kind));
+        return {
+          coverage: data.coverage,
+          unmatched_keys: data.unmatched,
+          forge_objects_with_no_work_package: unmappedItems.map((i) => ({
+            repository: i.repository, kind: i.kind, ref: i.ref, title: i.title, state: i.state, url: i.url,
+          })),
+          count: unmappedItems.length,
+          note: 'A key found in a repository that matches no work package is kept, not dropped. '
+            + 'Give a work package that key and the next pull links it.',
+        };
+      }
+      const wp = await workPackageByAnyKey(args.key, ids);
+      const data = await views5.workPackageGit(ctx, wp.id);
+      return {
+        work_package: data.work_package,
+        mapping: data.mapping,
+        links: data.links,
+        commits: data.revisions,
+        count: data.links.filter((l) => !l.removed).length,
+      };
+    },
+  },
+
+  'git.deck': {
+    mode: 'read',
+    description:
+      'The repositories in scope: pull requests, issues, CI, the health score and how much of the '
+      + 'work is mapped. THE HEALTH SCORE AND THE CI RATE ARE NOT PROGRESS. Health is repository '
+      + 'hygiene, CI is a pipeline, and neither enters the readiness figure that portfolio.status '
+      + 'reports. Do not add them together and do not present either as completion.',
+    schema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Restrict to one project code.' },
+      },
+      additionalProperties: false,
+    },
+    async run(args) {
+      const ids = await scopedProjectIds();
+      const project = args.project ? await projectInScope(args.project) : null;
+      const data = await views5.deck(
+        { user: { id: null }, visibleProjectIds: ids, today: today() },
+        { projectId: project ? Number(project.id) : null }
+      );
+      return {
+        repositories: data.repositories.map((r) => ({
+          name: r.name, project: r.project_code, scm: r.scm, slug: r.slug,
+          state: r.state, pull_state: r.pull_state, last_synced: r.last_synced,
+          counts: r.counts, health: r.health, ci: r.ci, digest: r.digest,
+          forge_objects_mapped: `${r.coverage.items_linked}/${r.coverage.items}`,
+          // Whether the forge can reach us, and whether a delivery may move
+          // anything. Never the secret — only the name of the variable and
+          // whether it is set.
+          webhook: {
+            open: Boolean(r.hook.secret_env && r.hook.secret_present),
+            secret_env: r.hook.secret_env, state: r.hook.state, last: r.hook.last,
+            acts_as: r.hook.actor || 'nobody — deliveries mirror and move no status',
+          },
+        })),
+        coverage: data.coverage,
+        mapping: data.mapping,
+        recent_pulls: data.pulls,
+        count: data.repositories.length,
+        note: data.note,
+      };
+    },
+  },
+
+  'git.pull': {
+    mode: 'write',
+    description:
+      'Pull a repository now: fetch its pull requests, issues, milestones, releases and CI, mirror '
+      + 'them, and re-match their keys to work packages. A write because it reaches the network on '
+      + "the tracker's behalf and, where a repository has been configured to allow it, can move a "
+      + 'work package through the status workflow. `dry_run` fetches and matches and writes nothing, '
+      + 'which is how to find out what a first pull would do.',
+    schema: {
+      type: 'object',
+      properties: {
+        repository: { type: 'string', description: 'The repository name or slug, e.g. "seedfall/seedfall".' },
+        dry_run: { type: 'boolean', description: 'Fetch and match, write nothing.' },
+      },
+      required: ['repository'],
+      additionalProperties: false,
+    },
+    async run(args) {
+      const ctx = await writeContext();
+      const ids = await scopedProjectIds();
+      const clause = db.inClause(ids.length ? ids : [0]);
+      const repo = await db.one(
+        `SELECT id, name, scm FROM repositories
+          WHERE (name = ? OR slug = ?) AND project_id IN ${clause.sql}`,
+        [String(args.repository), String(args.repository), ...clause.params]
+      );
+      if (!repo) throw new Error(`no repository "${args.repository}" in this token's scope`);
+      const report = await gitPull.pullRepository(ctx, repo.id, { dryRun: Boolean(args.dry_run) });
+      return {
+        ...report,
+        count: report.links_made,
+        note: report.dry_run
+          ? 'Nothing was written. The dry run itself is recorded.'
+          : 'A link a person removed by hand is never re-made by a pull; those are counted as held.',
+      };
     },
   },
 };

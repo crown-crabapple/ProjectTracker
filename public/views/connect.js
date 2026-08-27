@@ -85,8 +85,28 @@
                     style: { color: STATE_COLOURS[r.state] },
                     text: `${r.revisions} REV`,
                   }),
+                  // 'connected' on a repository nothing has ever pulled is not
+                  // the same fact, so both are shown.
+                  h('span.tag.small', {
+                    style: {
+                      color: r.pull_state === 'error' ? 'var(--blocked)'
+                        : r.pull_state === 'ok' ? 'var(--ok)' : 'var(--ink-6)',
+                    },
+                    text: r.pullable
+                      ? (r.pull_state === 'never' ? 'NEVER PULLED' : `PULLED ${r.last_synced.toUpperCase()}`)
+                      : 'NO API CLIENT',
+                  }),
                 ])))
                 : h('div.empty', { text: 'no repositories connected' }),
+              h('p.note', {
+                text: 'A GitHub, GitLab or Forgejo repository is pulled from the git deck, the '
+                  + 'command line or the git.pull MCP tool — there is no scheduler. A git or svn row '
+                  + 'is recorded here and read by whoever clones it.',
+              }),
+              h('button.btn.small', {
+                onclick: () => app.go('deck', {}),
+                text: 'OPEN THE GIT DECK',
+              }),
             ]),
           ]),
 

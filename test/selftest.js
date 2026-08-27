@@ -64,7 +64,7 @@ async function throws(name, fn, expected) {
 
 // ------------------------------------------------------- pure, no database yet
 
-function pureChecks() {
+async function pureChecks() {
   const rollup = require('../src/domain/rollup');
   const sched = require('../src/domain/scheduling');
   const subject = require('../src/domain/subject');
@@ -204,6 +204,172 @@ function pureChecks() {
     return uid(a) === uid(b);
   })(), 'an unstable UID duplicates every event on every refresh');
 
+  // --- the git deck: which repository object is which work package
+  //
+  // These are the checks that stop the mapping claiming more than it knows. A
+  // link is a claim about somebody's work, and the difference between 'closes
+  // WP-112' and 'blocked on WP-112' is the whole of it.
+  const gitdeck = require('../src/domain/gitdeck');
+  const forge = require('../src/gitdeck/client');
+
+  const RULE = { item_kind: 'pull_request', relation: 'implements', key_prefix: 'F' };
+  const index = new Map([
+    ['WP-112', { id: 112, project_id: 1, type_name: 'FEATURE', rule: RULE }],
+    ['F-UI-007', { id: 112, project_id: 1, type_name: 'FEATURE', rule: RULE }],
+    ['B-ENG-003', { id: 200, project_id: 1, type_name: 'BUG', rule: { item_kind: 'issue', relation: 'fixes', key_prefix: 'B' } }],
+    ['F-OTHER-001', { id: 900, project_id: 2, type_name: 'FEATURE', rule: RULE }],
+  ]);
+  const match = (item) => gitdeck.matchItem(item, index, { repositoryProjectId: 1 });
+
+  eq('a key in the title is what the change is',
+    match({ kind: 'pull_request', title: 'F-UI-007 weighted rollup' }).links
+      .map((l) => [l.matched_key, l.relation, l.matched_in]),
+    [['F-UI-007', 'implements', 'title']]);
+  eq('a key in the body is a mention until a verb claims it',
+    match({ kind: 'pull_request', title: 'x', body: 'blocked on WP-112' }).links.map((l) => l.relation),
+    ['mentions']);
+  eq('and a closing verb makes the same key a claim',
+    match({ kind: 'pull_request', title: 'x', body: 'closes WP-112' }).links.map((l) => l.relation),
+    ['implements']);
+  eq('a lowercase key in a branch name still matches',
+    match({ kind: 'pull_request', title: 'x', head_branch: 'feature/f-ui-007-rollup' }).links
+      .map((l) => [l.matched_key, l.origin]),
+    [['F-UI-007', 'branch']]);
+  check('but a lowercase key in a title does not',
+    match({ kind: 'pull_request', title: 'fix the f-ui-007 connector' }).links.length === 0,
+    'an English sentence became a claim about somebody\'s feature');
+  eq('a type mapped to issues is only mentioned by a pull request',
+    match({ kind: 'pull_request', title: 'B-ENG-003 crash' }).links.map((l) => l.relation), ['mentions']);
+  eq('and implements the issue it is mapped to',
+    match({ kind: 'issue', title: 'B-ENG-003 crash' }).links.map((l) => l.relation), ['fixes']);
+  eq('a key belonging to another project is not linked across',
+    match({ kind: 'pull_request', title: 'F-OTHER-001 elsewhere' }).unmatched
+      .map((u) => [u.candidate, u.reason]),
+    [['F-OTHER-001', 'that key belongs to another project']]);
+  eq('a key nothing carries is reported rather than dropped',
+    match({ kind: 'pull_request', title: 'F-LOAD-207 glossary' }).unmatched.map((u) => u.candidate),
+    ['F-LOAD-207']);
+  eq('one key written twice is one link',
+    match({
+      kind: 'pull_request', title: 'F-UI-007 rollup', body: 'F-UI-007 again',
+      head_branch: 'feature/f-ui-007',
+    }).links.length, 1);
+
+  check('a repository key must be a shape a branch could carry',
+    gitdeck.isValidRefKey('F-LOAD-012') && gitdeck.isValidRefKey('PH-2')
+    && !gitdeck.isValidRefKey('the loader') && !gitdeck.isValidRefKey('F-LOAD'),
+    'a key no branch name could match is a key that silently never links');
+
+  // The health score is gitdeck's, and these are its numbers. 78 to start, minus
+  // 8 for a stale issue and 3 for the open one, plus 10 for a push this week.
+  const staleDay = new Date(Date.now() - 40 * 86400000).toISOString().slice(0, 19).replace('T', ' ');
+  const health = gitdeck.healthScore({
+    issues: [{ updated_at: staleDay }],
+    pushed_at: new Date(Date.now() - 2 * 86400000).toISOString().slice(0, 19).replace('T', ' '),
+    now: Date.now(),
+  });
+  eq('the health score is gitdeck\'s arithmetic', health.score, 77);
+  check('and says which signals it could actually read',
+    health.basis.includes('push recency') && !health.basis.includes('traffic'),
+    JSON.stringify(health.basis));
+  check('security alerts nobody may read are not scored as none',
+    gitdeck.healthScore({ issues: [], security_alerts_unavailable: true })
+      .basis.join(' ').includes('UNAVAILABLE'),
+    'zero open alerts and no permission to look are opposite facts');
+
+  const ci = gitdeck.ciSummary([
+    { state: 'completed', conclusion: 'success', duration_sec: 100 },
+    { state: 'completed', conclusion: 'failure', duration_sec: 200 },
+    { state: 'completed', conclusion: 'cancelled', duration_sec: 10 },
+    { state: 'completed', conclusion: 'skipped' },
+    { state: 'in_progress', conclusion: null },
+  ]);
+  eq('a CI rate counts successes and failures only', ci.success_pct, 50);
+  eq('and cancelled, skipped and running runs are counted apart',
+    [ci.cancelled, ci.skipped, ci.running], [1, 1, 1]);
+  check('a pipeline where nothing has finished has no rate, not a rate of zero',
+    gitdeck.ciSummary([{ state: 'in_progress', conclusion: null }]).success_pct === null,
+    'zero per cent means every run failed, which is a different morning');
+
+  const cover = gitdeck.coverage({
+    workPackages: [
+      { id: 1, git_item_kind: 'pull_request' },
+      { id: 2, git_item_kind: 'pull_request' },
+      { id: 3, git_item_kind: 'none' },
+    ],
+    items: [{ id: 10, kind: 'pull_request' }, { id: 11, kind: 'pull_request' }],
+    links: [{ work_package_id: 1, git_item_id: 10 }],
+  });
+  eq('coverage counts both directions', [cover.pct, cover.items_pct], [50, 50]);
+  check('a type that maps to nothing is excluded, not counted as missing',
+    cover.mappable === 2 && cover.excluded_types === 1,
+    'otherwise the figure improves by deleting phases');
+
+  eq('a repository URL yields the owner and name the API needs',
+    ['https://github.com/seedfall/seedfall.git', 'git@github.com:seedfall/seedfall',
+      'https://codeberg.org/x/y/'].map(forge.slugFromUrl),
+    ['seedfall/seedfall', 'seedfall/seedfall', 'x/y']);
+  await throws('a plain git repository has no API client and says so',
+    async () => forge.connectionFor({ scm: 'git', name: 'local', url: '~/code/x' }), 'no API client');
+  await throws('a forgejo repository with no api_base is refused rather than guessed',
+    async () => forge.connectionFor({ scm: 'forgejo', name: 'cb', url: 'https://codeberg.org/x/y' }),
+    'no api_base');
+
+
+  // --- the webhook receiver: verification and mapping, without a database
+  const hooks = require('../src/gitdeck/hooks');
+  const hookBody = Buffer.from(JSON.stringify({ action: 'opened' }), 'utf8');
+  const hookSecret = 'a-shared-secret';
+  const hookSig = 'sha256=' + crypto.createHmac('sha256', hookSecret).update(hookBody).digest('hex');
+  check('a GitHub signature over the raw bytes verifies',
+    hooks.verify('github', { 'x-hub-signature-256': hookSig }, hookBody, hookSecret).ok);
+  check('a signature over different bytes does not',
+    !hooks.verify('github', { 'x-hub-signature-256': hookSig }, Buffer.from('{}'), hookSecret).ok);
+  check('and neither does no signature at all',
+    !hooks.verify('github', {}, hookBody, hookSecret).ok,
+    'an unsigned delivery must never be accepted');
+  check('Forgejo sends the same digest without the prefix, and it verifies',
+    hooks.verify('forgejo', { 'x-forgejo-signature': hookSig.slice(7) }, hookBody, hookSecret).ok);
+  check('GitLab sends the secret back and it is compared in constant time',
+    hooks.verify('gitlab', { 'x-gitlab-token': hookSecret }, hookBody, hookSecret).ok
+    && !hooks.verify('gitlab', { 'x-gitlab-token': 'nearly-right' }, hookBody, hookSecret).ok);
+
+  eq('a form-encoded delivery is read the same as a JSON one',
+    hooks.parseBody('application/x-www-form-urlencoded',
+      Buffer.from('payload=' + encodeURIComponent('{"action":"opened"}'))),
+    { action: 'opened' });
+
+  const prEvent = hooks.itemsFrom('github', 'pull_request', {
+    action: 'closed',
+    pull_request: {
+      number: 978, title: 'F-LOAD-012 parse decisions', state: 'closed',
+      merged_at: '2026-08-24T09:00:00Z', head: { ref: 'feature/f-load-012' }, base: { ref: 'main' },
+      html_url: 'https://forge.invalid/pull/978', user: { login: 'stephen' }, labels: [],
+    },
+  });
+  eq('a delivered pull request normalises exactly as a fetched one does',
+    prEvent.items.map((i) => [i.kind, i.ref, i.state, i.head_branch]),
+    [['pull_request', '978', 'merged', 'feature/f-load-012']]);
+  const pushEvent = hooks.itemsFrom('github', 'push', {
+    ref: 'refs/heads/feature/f-ui-021-list',
+    commits: [{ id: 'abc123', message: 'F-UI-021 wire it', timestamp: '2026-08-25T08:00:00Z', author: { name: 'S' } }],
+  });
+  eq('a push carries its branch and its commits',
+    [pushEvent.items.map((i) => `${i.kind} ${i.ref}`), pushEvent.commits.map((c) => c.identifier)],
+    [['branch feature/f-ui-021-list'], ['abc123']]);
+  check('a tag push is not mirrored as a branch',
+    hooks.itemsFrom('github', 'push', { ref: 'refs/tags/v1.0.0', commits: [] }).items.length === 0);
+  check('an event this receiver does not know is named, not thrown',
+    hooks.itemsFrom('github', 'star', {}).unknown === 'star',
+    'a receiver that 400s on an unsubscribed event teaches people to narrow the subscription');
+  check('a GitLab merge request hook maps through the same normaliser',
+    hooks.itemsFrom('gitlab', 'Merge Request Hook', {
+      object_kind: 'merge_request',
+      object_attributes: { iid: 12, title: 'F-UI-007 rollup', state: 'merged', source_branch: 'f-ui-007', url: 'https://x/12' },
+      user: { username: 'modell' },
+    }).items[0].ref === '12');
+
+
   // --- passwords
   const hashed = passwords.hash('correct horse');
   check('the right password verifies', passwords.verify('correct horse', hashed.hash, hashed.salt));
@@ -226,6 +392,66 @@ function pureChecks() {
   eq('a quoted boundary is read', boundaryOf('multipart/form-data; boundary="abc"'), 'abc');
   eq('an unquoted boundary is read', boundaryOf('multipart/form-data; boundary=abc'), 'abc');
   eq('a missing boundary is null', boundaryOf('application/json'), null);
+
+  // --- the graph maths behind the map
+  //
+  // `graph.rank` is the one longest-path walk in the product: `decisions.layer`
+  // delegates to it and the relations graph on the map calls it directly. Two
+  // copies would be two answers to how deep a node sits.
+  const graph = require('../src/domain/graph');
+  const chain = graph.rank([1, 2, 3], [{ from: 2, to: 1 }, { from: 3, to: 2 }]);
+  eq('a chain ranks in order', [chain.get(1), chain.get(2), chain.get(3)], [0, 1, 2]);
+  const diamond = graph.rank([1, 2, 3, 4],
+    [{ from: 2, to: 1 }, { from: 3, to: 1 }, { from: 4, to: 2 }, { from: 4, to: 3 }]);
+  eq('a node ranks behind its DEEPEST dependency, not its first', diamond.get(4), 2);
+
+  // The relations table permits a loop; `decision_dependencies` refuses one.
+  // So this guard is load-bearing for one caller and a belt for the other, and
+  // the thing that must not happen is a hang.
+  const looped = graph.rank([1, 2, 3], [{ from: 1, to: 2 }, { from: 2, to: 3 }, { from: 3, to: 1 }]);
+  check('a cycle ranks rather than recursing forever', looped.size === 3, JSON.stringify([...looped]));
+  const found = graph.cycles([1, 2, 3], [{ from: 1, to: 2 }, { from: 2, to: 3 }, { from: 3, to: 1 }]);
+  eq('and the edge that closes the loop is named, so somebody knows which link to cut',
+    found.length, 1);
+  eq('a graph with no loop reports none',
+    graph.cycles([1, 2, 3], [{ from: 2, to: 1 }, { from: 3, to: 2 }]).length, 0);
+  // A picture that redraws differently for the same data is one nobody trusts.
+  eq('columns are ordered by the caller\'s key, not by insertion',
+    graph.columns([3, 1, 2], graph.rank([1, 2, 3], []), (id) => ({ 1: 'c', 2: 'a', 3: 'b' })[id]),
+    [[2, 3, 1]]);
+
+  // A rank is a position in a picture, and this is what keeps it one: the
+  // module reaches nothing. It cannot see a status weight, so it cannot
+  // produce a figure that could be mistaken for progress.
+  const graphSource = fs.readFileSync(path.join(ROOT, 'src/domain/graph.js'), 'utf8');
+  check('graph.js depends on nothing', !/\brequire\(/.test(graphSource));
+  check('and reads no field that carries progress',
+    !/\b(progress_weight|status_code|story_points)\b/.test(
+      graphSource.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')));
+
+  // --- the map draws no number of its own
+  //
+  // The whole argument of `docs/decisions/0011`. If this file ever computes one
+  // it becomes a second progress model, and the two disagree in front of
+  // somebody deciding which to believe.
+  const views7Source = fs.readFileSync(path.join(ROOT, 'src/api/views7.js'), 'utf8');
+  check('views7 computes no percentage of its own',
+    !/Math\.round\([^)]*\*\s*100/.test(views7Source) && !/\/\s*\w+\s*\)\s*\*\s*100/.test(views7Source),
+    'the map must take every figure from rollup.js');
+  check('and it is a read path — no mutation module is reachable from it',
+    !/require\('\.\.?\/.*mutations/.test(views7Source));
+
+  const views7 = require('../src/api/views7');
+  check('a relation kind that carries no order has no precedence entry',
+    !views7.PRECEDENCE.relates && !views7.PRECEDENCE.duplicates && !views7.PRECEDENCE.includes,
+    'includes is containment; treating it as order would rank a parent behind its own children');
+  // The table stores one direction per kind and derives the inverse on read, so
+  // `blocks` runs the other way round from `follows`. Reading it wrong draws
+  // every arrow backwards.
+  eq('follows means the from side happens after',
+    views7.PRECEDENCE.follows({ from_id: 7, to_id: 4 }), { from: 7, to: 4 });
+  eq('blocks means the to side happens after',
+    views7.PRECEDENCE.blocks({ from_id: 7, to_id: 4 }), { from: 4, to: 7 });
 
   // --- the identifier guard
   const db = require('../src/db');
@@ -513,6 +739,212 @@ async function databaseChecks(db) {
   check('and the refusal carries the other version so both can be shown',
     conflictPayload && conflictPayload.currentBody !== undefined);
 
+  // --- decisions
+  //
+  // A decision used to be a wiki page; it is a record now, with two link
+  // tables that say what waits on it and what it waits on. The graph maths
+  // comes from `src/domain/decisions.js` once, the same rule `rollup.js`
+  // enforces for a percentage.
+  const mut4 = require('../src/api/mutations4');
+  const decisionsDomain = require('../src/domain/decisions');
+  const rollup = require('../src/domain/rollup');
+
+  const d19 = await db.one("SELECT id, ref, state FROM decisions WHERE project_id = ? AND ref = 'D-19'", [vw]);
+  const d22 = await db.one("SELECT id, ref, state FROM decisions WHERE project_id = ? AND ref = 'D-22'", [vw]);
+  const d08 = await db.one("SELECT id, ref, state FROM decisions WHERE project_id = ? AND ref = 'D-08'", [vw]);
+  const d14 = await db.one("SELECT id, ref, state FROM decisions WHERE project_id = ? AND ref = 'D-14'", [vw]);
+  const d25 = await db.one("SELECT id, ref, state FROM decisions WHERE project_id = ? AND ref = 'D-25'", [vw]);
+
+  await throws('a decision that waits on an open decision cannot be settled',
+    () => mut4.updateDecision(ctx, d19.id, { state: 'settled' }), 'D-22');
+  await mut4.updateDecision(ctx, d22.id, { state: 'settled' });
+  const settledD19 = await mut4.updateDecision(ctx, d19.id, { state: 'settled' });
+  eq('and settling the one it waits on first lets it through', settledD19.state, 'settled');
+
+  await mut4.addDependency(ctx, d25.id, { depends_on_id: d08.id });
+  await throws('two decisions cannot be made to gate each other',
+    () => mut4.addDependency(ctx, d08.id, { depends_on_id: d25.id }), 'D-25 waits on D-08');
+  await throws('a decision cannot depend on itself',
+    () => mut4.addDependency(ctx, d25.id, { depends_on_id: d25.id }), 'cannot depend on itself');
+
+  // D-14 blocks WP-112 is a seeded link.
+  const dwpCountBefore = Number(await db.scalar(
+    'SELECT COUNT(*) FROM decision_work_packages WHERE decision_id = ? AND work_package_id = 112', [d14.id]));
+  await mut4.unlinkWork(ctx, d14.id, 112);
+  const dwpAfterUnlink = await db.one(
+    'SELECT removed_at FROM decision_work_packages WHERE decision_id = ? AND work_package_id = 112', [d14.id]);
+  eq('a link a person removed keeps its row', Number(await db.scalar(
+    'SELECT COUNT(*) FROM decision_work_packages WHERE decision_id = ? AND work_package_id = 112', [d14.id]
+  )), dwpCountBefore);
+  check('and says the link was removed', dwpAfterUnlink.removed_at !== null);
+
+  // D-19 depends on D-22 is a seeded dependency.
+  const ddCountBefore = Number(await db.scalar(
+    'SELECT COUNT(*) FROM decision_dependencies WHERE decision_id = ? AND depends_on_id = ?', [d19.id, d22.id]));
+  await mut4.removeDependency(ctx, d19.id, d22.id);
+  const ddAfterRemove = await db.one(
+    'SELECT removed_at FROM decision_dependencies WHERE decision_id = ? AND depends_on_id = ?', [d19.id, d22.id]);
+  eq('the same for a dependency somebody removed', Number(await db.scalar(
+    'SELECT COUNT(*) FROM decision_dependencies WHERE decision_id = ? AND depends_on_id = ?', [d19.id, d22.id]
+  )), ddCountBefore);
+  check('and its removed_at is set too', ddAfterRemove.removed_at !== null);
+
+  await throws('a matcher never revives a link a person removed',
+    () => mut4.linkWork(ctx, d14.id, { work_package_id: 112, relation: 'blocks', origin: 'matcher' }),
+    'unlinked');
+  const dwpStillRemoved = await db.scalar(
+    'SELECT removed_at FROM decision_work_packages WHERE decision_id = ? AND work_package_id = 112', [d14.id]);
+  check('and removed_at is not cleared by the attempt', dwpStillRemoved !== null);
+
+  // The document a decision points at drops out of the wiki index; a document
+  // nothing points at does not.
+  const decisionSourceDoc = await mut2.createDocument(ctx, {
+    project_id: vw, title: 'Selftest decision source', body: 'source text',
+  });
+  await mut4.createDecision(ctx, {
+    project_id: vw, ref: 'D-90', title: 'A selftest decision', document_id: decisionSourceDoc.id,
+  });
+  const wikiAfter = await views4.wiki(ctx, { projectId: vw });
+  check('a decision page has left the wiki',
+    !wikiAfter.docs.some((d) => d.id === decisionSourceDoc.id)
+    && wikiAfter.docs.some((d) => d.slug === 'build-plan'),
+    JSON.stringify(wikiAfter.docs.map((d) => d.slug)));
+
+  // An open decision, or a link to one, must not move the number `rollup.js`
+  // computes — the same discipline the git deck's health score is held to.
+  const readinessBefore = rollup.readiness(await query.select({ filters: { project: vw } }));
+  await mut4.createDecision(ctx, { project_id: vw, ref: 'D-91', title: 'Another selftest decision' });
+  await mut4.linkWork(ctx, d25.id, { work_package_id: 112, relation: 'blocks' });
+  const readinessAfter = rollup.readiness(await query.select({ filters: { project: vw } }));
+  eq('an open decision is not progress', readinessAfter, readinessBefore);
+
+  const chainLayers = decisionsDomain.layer(
+    [{ id: 1 }, { id: 2 }, { id: 3 }],
+    [{ decision_id: 2, depends_on_id: 1 }, { decision_id: 3, depends_on_id: 2 }]
+  );
+  check('the gating chain is ordered',
+    chainLayers.get(1) < chainLayers.get(2) && chainLayers.get(2) < chainLayers.get(3),
+    JSON.stringify([...chainLayers]));
+
+  await mut4.createDecision(ctx, { project_id: vw, ref: 'D-92', title: 'Trail check decision' });
+  const decisionTrail = await db.one(`
+    SELECT id FROM activities WHERE project_id = ? AND kind = 'decision' AND target_label = 'D-92'
+     ORDER BY id DESC LIMIT 1`, [vw]);
+  check('writing a decision is recorded in the trail', Boolean(decisionTrail));
+
+  await throws('somebody without record_decisions cannot settle a decision',
+    () => mut4.updateDecision(readerCtx, d25.id, { state: 'settled' }), 'record_decisions');
+
+  // --- the map
+  //
+  // One project, three pictures. Every figure on it comes from `rollup.js` and
+  // every rank from `src/domain/graph.js`; these checks are that the payload
+  // says so honestly, not that the arithmetic is right — the arithmetic is
+  // checked where it lives.
+  const views7Api = require('../src/api/views7');
+  const mapData = await views7Api.map(ctx, { projectId: vw });
+
+  const mapWps = await query.select({ filters: { project: vw }, limit: 1000 });
+  eq('the map reports the same readiness as rollup does for the same list',
+    mapData.totals.readiness, rollup.readiness(mapWps));
+  eq('and the same completion, beside it rather than folded into it',
+    mapData.totals.completion, rollup.completion(mapWps));
+  check('readiness and completion are separate keys, never one figure',
+    mapData.totals.readiness.pct !== undefined && mapData.totals.completion.done !== undefined
+      && mapData.totals.readiness.pct !== mapData.totals.completion.done + mapData.totals.completion.partial,
+    JSON.stringify(mapData.totals));
+
+  // Excluded is not zero, and the client can only say so if the NULL survives.
+  check('an excluded status keeps its NULL weight all the way to the payload',
+    mapData.statuses.some((st) => st.progress_weight === null),
+    JSON.stringify(mapData.statuses.map((st) => [st.code, st.progress_weight])));
+  // The deferred work in the demo portfolio is in CDX, not VW, so this is
+  // checked where the data is rather than asserted where it is not.
+  const cdxId = await db.scalar("SELECT id FROM projects WHERE code = 'CDX'");
+  const cdxMap = await views7Api.map(ctx, { projectId: cdxId });
+  const excludedRow = cdxMap.tree.groups.flatMap((g) => g.rows).find((r) => r.progress_weight === null);
+  check('and so does a work package sitting on one', Boolean(excludedRow),
+    'without it the screen draws a blank cell where it should say EXCLUDED');
+  check('excluded work leaves the denominator rather than being scored zero',
+    cdxMap.totals.readiness.excluded > 0
+      && cdxMap.totals.readiness.scored === cdxMap.totals.completion.total - cdxMap.totals.readiness.excluded,
+    JSON.stringify(cdxMap.totals.readiness));
+
+  await throws('the map refuses a grouping it does not know',
+    () => views7Api.map(ctx, { projectId: vw, group: 'colour' }), 'unknown grouping');
+  await throws('and refuses to be drawn for no project at all',
+    () => views7Api.map(ctx, { projectId: null }), 'one project');
+
+  const ungrouped = mapData.tree.groups;
+  eq('ungrouped, the tree is one group holding the whole hierarchy', ungrouped.length, 1);
+  check('and every work package is in it', ungrouped[0].rows.length === mapWps.length,
+    `${ungrouped[0].rows.length} of ${mapWps.length}`);
+  check('a child is drawn deeper than its parent',
+    ungrouped[0].rows.some((r) => r.depth > 0));
+  const withKids = ungrouped[0].rows.find((r) => r.childCount > 0);
+  check('a branch carries the pair for everything inside it', Boolean(withKids && withKids.subtree),
+    'a collapsed branch that says nothing about its contents is a branch nobody opens');
+
+  const grouped = await views7Api.map(ctx, { projectId: vw, group: 'version' });
+  check('grouping by version splits the tree', grouped.tree.groups.length > 1,
+    `${grouped.tree.groups.length} groups`);
+  eq('and every work package is still in exactly one group',
+    grouped.tree.groups.reduce((a, g) => a + g.rows.length, 0), mapWps.length);
+  check('each group carries its own pair, not a share of the project figure',
+    grouped.tree.groups.every((g) => g.readiness && g.completion));
+  // Sorting the unset bucket in alphabetically would bury it mid-list.
+  const unsetAt = grouped.tree.groups.findIndex((g) => g.key === null);
+  check('the unset bucket is last, or absent',
+    unsetAt === -1 || unsetAt === grouped.tree.groups.length - 1, String(unsetAt));
+
+  check('the relations graph draws only work that carries a relation',
+    mapData.relations.nodes.every((n) => mapData.relations.edges
+      .some((e) => e.from_id === n.id || e.to_id === n.id)),
+    'a hundred unconnected dots say nothing the tree does not say better');
+  check('and every relation it draws has both ends on the map',
+    mapData.relations.edges.every((e) => mapData.relations.nodes.some((n) => n.id === e.from_id)
+      && mapData.relations.nodes.some((n) => n.id === e.to_id)));
+  check('an unordered relation kind gets no arrow direction',
+    mapData.relations.edges.filter((e) => !views7Api.PRECEDENCE[e.kind])
+      .every((e) => e.after === null && e.before === null));
+
+  // The drawing limit is a refusal that says why, not a silent truncation.
+  eq('the drawing limit is reported whether or not it was hit',
+    typeof mapData.relations.limit, 'number');
+  check('a graph under the limit is drawn', mapData.relations.drawn === true,
+    `${mapData.relations.nodeCount} nodes, limit ${mapData.relations.limit}`);
+
+  check('the decision graph ranks a gated decision behind its gate',
+    mapData.decisions.nodes.every((n) => mapData.decisions.edges
+      .filter((e) => e.from === n.id)
+      .every((e) => {
+        const gate = mapData.decisions.nodes.find((o) => o.id === e.to);
+        return !gate || gate.rank < n.rank;
+      })));
+  check('a link to a decision records where it came from',
+    mapData.decisions.links.every((l) => ['person', 'import', 'matcher'].includes(l.origin)),
+    'a regex claim drawn the same as a person claim is the thing the git deck rules prevent');
+  check('and a decision blocking nothing is not counted as blocking something',
+    mapData.decisions.nodes.every((n) => n.blocksCount >= 0)
+      && mapData.decisions.nodes.every((n) => n.state === 'open' || n.blocksCount === 0));
+
+  // A link somebody removed keeps its row and is never revived. The map is a
+  // read path, so the only way it could revive one is by forgetting the
+  // removed_at filter — which is exactly the mistake this makes visible.
+  const drawnLink = mapData.decisions.links[0];
+  check('the map draws a live decision link at all', Boolean(drawnLink));
+  if (drawnLink) {
+    await mut4.unlinkWork(ctx, drawnLink.decision_id, drawnLink.work_package_id);
+    const afterRemoval = await views7Api.map(ctx, { projectId: vw });
+    check('a link somebody removed is not drawn on the map',
+      !afterRemoval.decisions.links.some((l) => l.decision_id === drawnLink.decision_id
+        && l.work_package_id === drawnLink.work_package_id));
+    check('and the row is kept rather than deleted',
+      Number(await db.scalar(`SELECT COUNT(*) FROM decision_work_packages
+         WHERE decision_id = ? AND work_package_id = ? AND removed_at IS NOT NULL`,
+      [drawnLink.decision_id, drawnLink.work_package_id])) === 1);
+  }
+
   // --- meetings
   const meeting = await db.one("SELECT id FROM meetings WHERE state = 'minutes' LIMIT 1");
   await throws('a frozen agenda refuses a new item',
@@ -645,10 +1077,12 @@ async function databaseChecks(db) {
   eq('and a question naming a feature the file does not carry is reported, not dropped silently',
     imported1.report.questions.orphans, ['Q-F-ZZ-999-def']);
 
-  const decisionPage = await db.one(
-    "SELECT number, title, status FROM documents WHERE project_id = ? AND slug = 'd2'", [zz]
+  const decisionRow = await db.one(
+    "SELECT ref, title, state FROM decisions WHERE project_id = ? AND ref = 'D2'", [zz]
   );
-  eq('a decision becomes a wiki page carrying its state', decisionPage.status, 'OPEN');
+  eq('a decision becomes a decisions row carrying its state', decisionRow.state, 'open');
+  eq('and creates no document for it',
+    Number(await db.scalar("SELECT COUNT(*) FROM documents WHERE project_id = ? AND slug = 'd2'", [zz])), 0);
   const zzProject = await db.one('SELECT health, health_note FROM projects WHERE id = ?', [zz]);
   check('and an unsettled decision makes the project rust, which is what rust is for',
     zzProject.health === 'rust' && /D2/.test(zzProject.health_note), JSON.stringify(zzProject));
@@ -683,6 +1117,10 @@ async function databaseChecks(db) {
   eq('a second import of the same file changes nothing', again.report.features.created, 0);
   eq('and adds no duplicate activity', again.report.activity.created, 0);
   eq('and no duplicate comment', again.report.questions.created, 0);
+  eq('a re-import updates the same decision rather than making a second one',
+    again.report.decisions.created, 0);
+  eq('and the ref still resolves to exactly one row',
+    Number(await db.scalar("SELECT COUNT(*) FROM decisions WHERE project_id = ? AND ref = 'D2'", [zz])), 1);
 
   fixture.features['F-AA-002'].status = 'done';
   delete fixture.features['F-BB-001'];
@@ -701,6 +1139,403 @@ async function databaseChecks(db) {
     () => importer.runImport({ file: stateFile, code: 'ZZ', asLogin: 'stephen' }), '"invented"');
   fs.rmSync(importDir, { recursive: true, force: true });
 
+  // --- the git deck, end to end against a stubbed forge
+  //
+  // The suite must not reach the network any more than it may reach the real
+  // database, so the client is created over a stub `fetch`. What is exercised is
+  // everything after the response: the normalising, the matching, the mirror,
+  // the trail, and the two rules that stop a pull overruling a person.
+  const gitdeckDomain = require('../src/domain/gitdeck');
+  const forgeClient = require('../src/gitdeck/client');
+  const gitPull = require('../src/gitdeck/pull');
+  const mut3 = require('../src/api/mutations3');
+  const views5 = require('../src/api/views5');
+
+  // The mapping the six types ship with. The example in the brief is the third
+  // row: a FEATURE is a pull request, and F- is the letter its keys start with.
+  const typeMap = await db.query(
+    'SELECT name, git_item_kind, git_relation, git_key_prefix FROM work_package_types ORDER BY position'
+  );
+  eq('every type says what it is in a repository',
+    typeMap.map((t) => [t.name, t.git_item_kind, t.git_relation, t.git_key_prefix]),
+    [['PHASE', 'milestone', 'tracks', 'PH'], ['EPIC', 'issue', 'tracks', 'E'],
+      ['FEATURE', 'pull_request', 'implements', 'F'], ['TASK', 'issue', 'implements', 'T'],
+      ['BUG', 'issue', 'fixes', 'B'], ['MILESTONE', 'release', 'releases', 'M']]);
+
+  const seedRepo = await db.one("SELECT * FROM repositories WHERE slug = 'seedfall/seedfall'");
+  check('the demo repository knows its owner and name', Boolean(seedRepo && seedRepo.slug));
+  check('and records the name of the variable its token is read from, never a token',
+    seedRepo.token_env === 'GITHUB_TOKEN'
+    && !Object.values(seedRepo).some((v) => typeof v === 'string' && /^gh[pousr]_/.test(v)),
+    JSON.stringify(seedRepo));
+
+  // The demo's links are seeded rows; the matcher is code. If they disagree,
+  // one of them is lying about what a pull would do.
+  const demoRules = await gitPull.rulesFor(seedRepo.id);
+  const demoIndex = await gitPull.indexFor(seedRepo.project_id, demoRules);
+  const demoItems = await db.query('SELECT * FROM git_items WHERE repository_id = ?', [seedRepo.id]);
+  const derivedLinks = [];
+  for (const item of demoItems) {
+    for (const link of gitdeckDomain.matchItem(item, demoIndex,
+      { repositoryProjectId: Number(seedRepo.project_id) }).links) {
+      derivedLinks.push([Number(link.work_package_id), item.kind, item.ref, link.relation, link.matched_key]);
+    }
+  }
+  const seededLinks = (await db.query(`
+    SELECT l.work_package_id, gi.kind, gi.ref, l.relation, l.matched_key
+      FROM work_package_git_links l JOIN git_items gi ON gi.id = l.git_item_id
+     WHERE gi.repository_id = ?`, [seedRepo.id]))
+    .map((l) => [Number(l.work_package_id), l.kind, l.ref, l.relation, l.matched_key]);
+  const asText = (rows) => rows.map((r) => r.join(' ')).sort();
+  eq('the demo links are exactly what the matcher would produce', asText(seededLinks), asText(derivedLinks));
+
+  // A stubbed GitHub. Two pull requests, an issue, a run, and one endpoint this
+  // token may not read.
+  const forgeResponses = {
+    '/repos/seedfall/seedfall/pulls': [
+      {
+        number: 1978, title: 'F-UI-021 filterable task list', state: 'open',
+        user: { login: 'stephen' }, head: { ref: 'feature/f-ui-021-list' }, base: { ref: 'main' },
+        html_url: 'https://forge.invalid/pull/1978', body: 'Blocked on WP-112 for now.',
+        labels: [{ name: 'ui' }], created_at: '2026-08-20T10:00:00Z', updated_at: '2026-08-25T10:00:00Z',
+      },
+      {
+        number: 1979, title: 'F-UI-007 weighted rollup', state: 'closed',
+        merged_at: '2026-08-24T09:00:00Z', user: { login: 'modell' },
+        head: { ref: 'feature/f-ui-007-rollup' }, base: { ref: 'main' },
+        html_url: 'https://forge.invalid/pull/1979', body: null, labels: [],
+        created_at: '2026-08-19T10:00:00Z', updated_at: '2026-08-24T09:00:00Z',
+      },
+    ],
+    '/repos/seedfall/seedfall/issues': [
+      {
+        number: 1300, title: 'F-NEW-999 something nobody has heard of', state: 'open',
+        user: { login: 'jlin' }, html_url: 'https://forge.invalid/issues/1300', body: null,
+        labels: [], created_at: '2026-08-18T10:00:00Z', updated_at: '2026-08-26T10:00:00Z',
+      },
+      { number: 1301, title: 'a pull request the issues endpoint also returned', state: 'open',
+        pull_request: {}, html_url: 'https://forge.invalid/issues/1301',
+        created_at: '2026-08-18T10:00:00Z', updated_at: '2026-08-18T10:00:00Z' },
+    ],
+    '/repos/seedfall/seedfall/milestones': [],
+    '/repos/seedfall/seedfall/releases': [],
+    '/repos/seedfall/seedfall/branches': [],
+    '/repos/seedfall/seedfall/actions/runs': { workflow_runs: [] },
+    '/repos/seedfall/seedfall/dependabot/alerts': 'FORBIDDEN',
+    '/repos/seedfall/seedfall/commits': [
+      { sha: 'feed1234beef', html_url: 'https://forge.invalid/commit/feed1234beef',
+        commit: { message: 'F-UI-021 wire the filter', author: { name: 'Stephen', date: '2026-08-25T08:00:00Z' } } },
+    ],
+  };
+  let forgeCalls = 0;
+  const stubFetch = (url) => {
+    forgeCalls += 1;
+    const path = String(url).replace('https://api.github.com', '').split('?')[0];
+    const data = forgeResponses[path];
+    const headers = new Map([['x-ratelimit-remaining', '4321']]);
+    headers.get = Map.prototype.get.bind(headers);
+    if (data === undefined) {
+      return Promise.resolve({ ok: false, status: 500, headers, json: async () => ({}) });
+    }
+    if (data === 'FORBIDDEN') {
+      return Promise.resolve({ ok: false, status: 403, headers, json: async () => ({}) });
+    }
+    return Promise.resolve({ ok: true, status: 200, headers, json: async () => data });
+  };
+  const stubClient = forgeClient.create({ fetchImpl: stubFetch });
+
+  const dryPull = await gitPull.pullRepository(ctx, seedRepo.id, { dryRun: true, client: stubClient });
+  const beforeItems = Number(await db.scalar('SELECT COUNT(*) FROM git_items WHERE repository_id = ?', [seedRepo.id]));
+  eq('a dry run writes no items', beforeItems, demoItems.length);
+  check('but is recorded as having happened',
+    Number(await db.scalar("SELECT COUNT(*) FROM git_pulls WHERE state = 'dry_run'")) === 1);
+  check('a forbidden endpoint is reported and does not fail the pull',
+    dryPull.problems.some((p) => /dependabot/.test(p)) && dryPull.items_seen > 0, JSON.stringify(dryPull.problems));
+
+  const pulled = await gitPull.pullRepository(ctx, seedRepo.id, { client: stubClient });
+  eq('the dry run and the real pull agree on what they would link',
+    [dryPull.items_seen, dryPull.links_made], [pulled.items_seen, pulled.links_made]);
+  check('a pull request the issues endpoint also returned is mirrored once',
+    Number(await db.scalar(
+      "SELECT COUNT(*) FROM git_items WHERE repository_id = ? AND ref IN ('1301')", [seedRepo.id]
+    )) === 0, 'GitHub returns pull requests from /issues; mirroring both makes two of everything');
+
+  const linkedTo1978 = await db.query(`
+    SELECT wp.wp_key, wp.ref_key, l.relation, l.origin, l.matched_key, l.matched_in
+      FROM work_package_git_links l
+      JOIN git_items gi ON gi.id = l.git_item_id
+      JOIN work_packages wp ON wp.id = l.work_package_id
+     WHERE gi.ref = '1978' AND gi.repository_id = ? ORDER BY l.relation`, [seedRepo.id]);
+  eq('F-UI-021 in a title implements the pull request, WP-112 in the body only mentions it',
+    linkedTo1978.map((l) => [l.matched_key, l.relation, l.matched_in]),
+    [['F-UI-021', 'implements', 'title'], ['WP-112', 'mentions', 'body']]);
+
+  check('a key that matches nothing is kept with the number of times it was seen',
+    Number(await db.scalar(
+      'SELECT seen_count FROM git_unmatched_keys WHERE repository_id = ? AND candidate = ?',
+      [seedRepo.id, 'F-NEW-999']
+    )) >= 1);
+
+  const commitLinked = await db.scalar(`
+    SELECT COUNT(*) FROM revision_work_packages rwp
+      JOIN repository_revisions rv ON rv.id = rwp.revision_id
+     WHERE rv.identifier = 'feed1234beef'`);
+  check('a key in a commit message links the commit to the work package', Number(commitLinked) === 1);
+
+  const pullTrail = await db.one(`
+    SELECT actor_id, actor_label, kind, verb FROM activities
+     WHERE kind = 'repo' AND verb = 'pulled' ORDER BY id DESC LIMIT 1`);
+  check('a pull is in the activity trail as a machine, not as the person who ran it',
+    pullTrail && pullTrail.actor_label === 'gitdeck' && pullTrail.actor_id === null,
+    JSON.stringify(pullTrail));
+
+  // A link a person removed is a decision. The next pull must not overturn it.
+  const link1978 = await db.one(`
+    SELECT l.id FROM work_package_git_links l JOIN git_items gi ON gi.id = l.git_item_id
+     WHERE gi.ref = '1978' AND l.relation = 'implements'`);
+  await mut3.unlinkWorkPackage(ctx, link1978.id);
+  const afterUnlink = await db.one('SELECT removed_at, removed_by FROM work_package_git_links WHERE id = ?',
+    [link1978.id]);
+  check('removing a link keeps its row and says who removed it',
+    afterUnlink.removed_at !== null && Number(afterUnlink.removed_by) === Number(ctx.user.id));
+  const secondPull = await gitPull.pullRepository(ctx, seedRepo.id, { client: stubClient });
+  check('and the next pull holds it back rather than re-making it',
+    secondPull.links_held >= 1
+    && (await db.scalar('SELECT removed_at FROM work_package_git_links WHERE id = ?', [link1978.id])) !== null,
+    `held ${secondPull.links_held}`);
+  await mut3.linkWorkPackage(ctx, 121, { item_id: Number(await db.scalar(
+    "SELECT id FROM git_items WHERE ref = '1978' AND repository_id = ?", [seedRepo.id]
+  )), relation: 'implements' });
+  check('a person can put it back by hand, which a pull cannot',
+    (await db.scalar('SELECT removed_at FROM work_package_git_links WHERE id = ?', [link1978.id])) === null);
+
+  // The status rule. Off by default, and even when on it goes through the
+  // workflow rather than around it.
+  eq('a pull moves no status until a repository is told to',
+    pulled.moves.length, 0);
+  const featureType = await db.scalar("SELECT id FROM work_package_types WHERE name = 'FEATURE'");
+  const doneStatus = await db.scalar("SELECT id FROM statuses WHERE code = 'done'");
+  const buildStatus = await db.scalar("SELECT id FROM statuses WHERE code = 'in_build'");
+  await db.run(`
+    INSERT INTO git_type_rules (repository_id, type_id, item_kind, relation, key_prefix, merged_status_id)
+    VALUES (?, ?, 'pull_request', 'implements', 'F', ?)`, [seedRepo.id, featureType, doneStatus]);
+  await db.run('UPDATE work_packages SET status_id = ? WHERE id = 112', [buildStatus]);
+  const withRule = await gitPull.pullRepository(ctx, seedRepo.id, { client: stubClient });
+  eq('a merged pull request moves the work package it implements',
+    Number(await db.scalar('SELECT status_id FROM work_packages WHERE id = 112')), Number(doneStatus));
+  check('and the move is in the trail as the machine',
+    Boolean(await db.one(`
+      SELECT id FROM activities WHERE work_package_id = 112 AND kind = 'status'
+        AND actor_label = 'gitdeck' AND actor_id IS NULL ORDER BY id DESC LIMIT 1`)),
+    JSON.stringify(withRule.moves));
+
+  const notStarted = await db.scalar("SELECT id FROM statuses WHERE code = 'not_started'");
+  await db.run('UPDATE work_packages SET status_id = ? WHERE id = 112', [notStarted]);
+  const refused = await gitPull.pullRepository(ctx, seedRepo.id, { client: stubClient });
+  check('but the status workflow still refuses a move it does not have',
+    Number(await db.scalar('SELECT status_id FROM work_packages WHERE id = 112')) === Number(notStarted)
+    && refused.problems.some((p) => /cannot move straight/.test(p)),
+    JSON.stringify(refused.problems));
+  await db.run('UPDATE work_packages SET status_id = ? WHERE id = 112', [buildStatus]);
+  await db.run('DELETE FROM git_type_rules WHERE repository_id = ?', [seedRepo.id]);
+
+  // The repository key: what makes F-LOAD-012 findable at all.
+  await throws('a repository key no branch could carry is refused',
+    () => mut3.setRefKey(ctx, 123, 'the loader'), 'not a key a repository could carry');
+  await throws('and two work packages cannot share one in a project',
+    () => mut3.setRefKey(ctx, 123, 'F-LOAD-012'), 'already carries the key');
+  const keyed = await mut3.setRefKey(ctx, 123, 'f-ui-030');
+  eq('a repository key is stored as it is written in a title', keyed.ref_key, 'F-UI-030');
+
+  await throws('a token pasted into token_env is refused rather than stored',
+    () => mut3.createRepository(ctx, {
+      project_id: 1, scm: 'github', name: 'x/y', url: 'https://github.com/x/y',
+      token_env: 'ghp_0123456789abcdefghijklmnopqrstuvwxyz',
+    }), 'looks like a token');
+  await throws('and so is anything else that is not a variable name',
+    () => mut3.createRepository(ctx, {
+      project_id: 1, scm: 'github', name: 'x/y', url: 'https://github.com/x/y',
+      token_env: 'my token please',
+    }), 'not an environment variable name');
+  await throws('a forgejo repository must say where its forge is',
+    () => mut3.createRepository(ctx, {
+      project_id: 1, scm: 'forgejo', name: 'x/y', url: 'https://codeberg.org/x/y',
+    }), 'api_base');
+
+  const deckPayload = await views5.deck(ctx, { projectId: 1 });
+  check('the deck reports a health score and says it is not readiness',
+    deckPayload.repositories.some((r) => r.health && typeof r.health.score === 'number')
+    && /not readiness|neither is readiness|readiness/i.test(deckPayload.note),
+    deckPayload.note);
+  check('a repository nothing has been pulled from has no health score at all',
+    deckPayload.repositories.some((r) => r.scm === 'git' && r.health === null),
+    'a number that looks computed and is not is worse than a blank');
+  eq('the deck names what a FEATURE maps to',
+    deckPayload.mapping.find((m) => m.type === 'FEATURE').example,
+    'F-LOAD-012 maps to pull request #978');
+  check('the pull requests it fetched are on the deck',
+    deckPayload.items.some((i) => i.kind === 'pull_request' && i.ref === '1978'),
+    `${deckPayload.items.length} items`);
+  check('and the forge was only ever reached through the stub', forgeCalls > 0);
+
+
+  // --- the webhook receiver, end to end
+  //
+  // The delivery is signed here with the same HMAC a forge would use, so what is
+  // exercised is the real path: verify the raw bytes, refuse anything that does
+  // not verify, record every outcome, and write through the pull's own mirror.
+  const hooksApi = require('../src/gitdeck/hooks');
+  const HOOK_SECRET = 'selftest-hook-secret';
+  process.env.PT_TEST_HOOK_SECRET = HOOK_SECRET;
+  const sign = (buf, secret = HOOK_SECRET) => (
+    'sha256=' + crypto.createHmac('sha256', secret).update(buf).digest('hex')
+  );
+  const deliver = (repoId, event, payload, opts = {}) => {
+    const raw = Buffer.from(JSON.stringify(payload), 'utf8');
+    return hooksApi.receive({
+      repositoryId: repoId,
+      headers: {
+        'x-github-event': event,
+        'x-github-delivery': opts.delivery || `selftest-${event}-${Math.round(payload.__n || 0)}`,
+        'x-hub-signature-256': opts.signature === null ? undefined : (opts.signature || sign(raw, opts.secret)),
+        'content-type': 'application/json',
+      },
+      raw,
+    });
+  };
+
+  const prPayload = (n, overrides = {}) => ({
+    __n: n,
+    action: overrides.action || 'closed',
+    pull_request: {
+      number: n, title: overrides.title || 'F-UI-021 filterable task list',
+      state: 'closed', merged_at: '2026-08-26T09:00:00Z',
+      user: { login: 'stephen' }, head: { ref: 'feature/f-ui-021-list' }, base: { ref: 'main' },
+      html_url: `https://forge.invalid/pull/${n}`, body: overrides.body || null, labels: [],
+      created_at: '2026-08-20T10:00:00Z', updated_at: '2026-08-26T09:00:00Z',
+      ...overrides.pull,
+    },
+  });
+
+  // Nothing is open until a repository names a secret. The demo seeds one, so
+  // it is cleared first — this is the path a freshly connected repository takes.
+  await db.run('UPDATE repositories SET hook_secret_env = NULL WHERE id = ?', [seedRepo.id]);
+  const closed = await deliver(seedRepo.id, 'pull_request', prPayload(3001));
+  eq('a repository with no hook_secret_env has no open endpoint', closed.status, 401);
+  check('and the refusal names what is missing rather than saying "forbidden"',
+    /hook_secret_env/.test(closed.body.error) && /never accepted/.test(closed.body.error),
+    closed.body.error);
+  check('and the refusal is recorded with its reason',
+    Number(await db.scalar(
+      "SELECT COUNT(*) FROM git_hook_deliveries WHERE repository_id = ? AND state = 'rejected'", [seedRepo.id]
+    )) >= 1);
+
+  await db.run("UPDATE repositories SET hook_secret_env = 'PT_TEST_MISSING_SECRET' WHERE id = ?", [seedRepo.id]);
+  const unset = await deliver(seedRepo.id, 'pull_request', prPayload(3002));
+  check('a secret variable that is not set is refused, and named',
+    unset.status === 401 && /PT_TEST_MISSING_SECRET/.test(unset.body.error), JSON.stringify(unset.body));
+
+  await db.run("UPDATE repositories SET hook_secret_env = 'PT_TEST_HOOK_SECRET' WHERE id = ?", [seedRepo.id]);
+  const wrongSig = await deliver(seedRepo.id, 'pull_request', prPayload(3003), { secret: 'not-the-secret' });
+  eq('a delivery signed with the wrong secret is refused', wrongSig.status, 401);
+  check('and nothing it carried was written',
+    Number(await db.scalar("SELECT COUNT(*) FROM git_items WHERE ref = '3003'")) === 0);
+
+  const applied = await deliver(seedRepo.id, 'pull_request', prPayload(3004), { delivery: 'd-3004' });
+  eq('a signed delivery is applied', applied.body.state, 'applied');
+  const mirrored = await db.one(
+    "SELECT kind, state, head_branch FROM git_items WHERE repository_id = ? AND ref = '3004'", [seedRepo.id]
+  );
+  eq('and the item it carried is mirrored as a merged pull request',
+    [mirrored.kind, mirrored.state], ['pull_request', 'merged']);
+  const hookLink = await db.one(`
+    SELECT l.relation, l.matched_key, l.actor_label, wp.wp_key
+      FROM work_package_git_links l
+      JOIN git_items gi ON gi.id = l.git_item_id
+      JOIN work_packages wp ON wp.id = l.work_package_id
+     WHERE gi.ref = '3004' AND gi.repository_id = ?`, [seedRepo.id]);
+  eq('and it is linked to the work package its title names, as a machine',
+    [hookLink.wp_key, hookLink.relation, hookLink.matched_key, hookLink.actor_label],
+    ['WP-121', 'implements', 'F-UI-021', 'gitdeck · webhook']);
+
+  const retry = await deliver(seedRepo.id, 'pull_request', prPayload(3004), { delivery: 'd-3004' });
+  eq('a redelivery of the same id is ignored rather than applied twice', retry.body.state, 'ignored');
+  check('and the retry keeps its own row, because a retry is a fact',
+    Number(await db.scalar(
+      'SELECT COUNT(*) FROM git_hook_deliveries WHERE repository_id = ? AND delivery_id = ?',
+      [seedRepo.id, 'd-3004']
+    )) === 2);
+
+  // A status rule, with and without somebody to act as.
+  await db.run(`
+    INSERT INTO git_type_rules (repository_id, type_id, item_kind, relation, key_prefix, merged_status_id)
+    VALUES (?, ?, 'pull_request', 'implements', 'F', ?)`, [seedRepo.id, featureType, doneStatus]);
+  await db.run('UPDATE work_packages SET status_id = ? WHERE id = 121', [buildStatus]);
+  await db.run('UPDATE repositories SET hook_actor_id = NULL WHERE id = ?', [seedRepo.id]);
+  const noActor = await deliver(seedRepo.id, 'pull_request', prPayload(3005), { delivery: 'd-3005' });
+  eq('with nobody to act as, a delivery moves no status',
+    Number(await db.scalar('SELECT status_id FROM work_packages WHERE id = 121')), Number(buildStatus));
+  check('and says so rather than reporting nothing happened',
+    noActor.body.problems.some((p) => /names nobody/.test(p)), JSON.stringify(noActor.body.problems));
+
+  await db.run('UPDATE repositories SET hook_actor_id = ? WHERE id = ?', [stephen, seedRepo.id]);
+  const withActor = await deliver(seedRepo.id, 'pull_request', prPayload(3006), { delivery: 'd-3006' });
+  eq('with an actor named, a merged pull request moves the work package it implements',
+    Number(await db.scalar('SELECT status_id FROM work_packages WHERE id = 121')), Number(doneStatus));
+  eq('and the delivery reports the move', withActor.body.moves.length, 1);
+  const hookTrail = await db.one(`
+    SELECT actor_id, actor_label FROM activities
+     WHERE work_package_id = 121 AND kind = 'status' ORDER BY id DESC LIMIT 1`);
+  check('and the trail records the webhook, not the person whose authority it borrowed',
+    hookTrail.actor_label === 'gitdeck · webhook' && hookTrail.actor_id === null,
+    JSON.stringify(hookTrail));
+
+  // A push: the branch and the commits, through the same matcher.
+  const pushRaw = {
+    ref: 'refs/heads/feature/f-load-012-decisions',
+    commits: [{
+      id: 'dd44ee55ff66', message: 'F-UI-021 wire the filter', url: 'https://forge.invalid/c/dd44',
+      timestamp: '2026-08-26T08:00:00Z', author: { name: 'Stephen' },
+    }],
+  };
+  const pushed = await deliver(seedRepo.id, 'push', pushRaw, { delivery: 'd-push' });
+  eq('a push mirrors the branch it created', pushed.body.state, 'applied');
+  check('and links the branch to the work package its name carries',
+    Boolean(await db.one(`
+      SELECT l.id FROM work_package_git_links l JOIN git_items gi ON gi.id = l.git_item_id
+       WHERE gi.kind = 'branch' AND gi.ref = 'feature/f-load-012-decisions' AND l.work_package_id = 103`)),
+    'a branch named for a feature should find it the moment it is pushed');
+  check('and links its commit to the work package its message names',
+    Number(await db.scalar(`
+      SELECT COUNT(*) FROM revision_work_packages rwp
+        JOIN repository_revisions rv ON rv.id = rwp.revision_id
+       WHERE rv.identifier = 'dd44ee55ff66'`)) === 1);
+
+  const ping = await deliver(seedRepo.id, 'ping', { zen: 'Design for failure.' }, { delivery: 'd-ping' });
+  check('a ping is answered and recorded rather than treated as an error',
+    ping.status === 200 && ping.body.state === 'ignored' && /ping/.test(ping.body.reason), JSON.stringify(ping.body));
+  const unknownEvent = await deliver(seedRepo.id, 'star', { action: 'created' }, { delivery: 'd-star' });
+  check('an event nothing is mirrored from is ignored with the event named',
+    unknownEvent.status === 200 && /star/.test(unknownEvent.body.reason), JSON.stringify(unknownEvent.body));
+
+  const unknownRepo = await hooksApi.receive({
+    repositoryId: 987654, headers: { 'x-github-event': 'ping' }, raw: Buffer.from('{}'),
+  });
+  check('a delivery to a repository that does not exist is a 404, and is still recorded',
+    unknownRepo.status === 404
+    && Number(await db.scalar('SELECT COUNT(*) FROM git_hook_deliveries WHERE repository_id IS NULL')) === 1);
+
+  await db.run('DELETE FROM git_type_rules WHERE repository_id = ?', [seedRepo.id]);
+
+  // Naming somebody who could not do it by hand is refused where it is set, not
+  // discovered at three in the morning in a delivery record.
+  await throws('a hook actor who cannot edit work packages here is refused',
+    () => mut3.updateRepository(ctx, seedRepo.id, { hook_actor: 'jlin' }), 'could never move one');
+  await throws('and a webhook secret pasted in place of a variable name is refused too',
+    () => mut3.updateRepository(ctx, seedRepo.id, { hook_secret_env: 'ghp_abcdefghijklmnopqrstuvwxyz0123' }),
+    'looks like a token');
+
+
   // --- the MCP surface
   const mcpRead = await mut2.issueMcpToken(ctx, { name: 'selftest read', scope: 'read' });
   check('an MCP token is returned once', mcpRead.secret.startsWith('pt_mcp_'));
@@ -714,6 +1549,9 @@ async function databaseChecks(db) {
     { jsonrpc: '2.0', id: 2, method: 'tools/list' },
     { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'portfolio.status', arguments: {} } },
     { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'summary.write', arguments: { body: 'x' } } },
+    { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'git.links', arguments: { key: 'F-LOAD-012' } } },
+    { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'git.deck', arguments: {} } },
+    { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'git.pull', arguments: { repository: 'seedfall/seedfall' } } },
   ]);
   const byId = new Map(mcp.map((m) => [m.id, m]));
   check('the MCP server answers initialize', Boolean(byId.get(1) && byId.get(1).result.serverInfo));
@@ -723,6 +1561,15 @@ async function databaseChecks(db) {
   check('portfolio.status returns projects', /"projects"/.test(byId.get(3).result.content[0].text));
   check('a read token calling the write tool is refused',
     Boolean(byId.get(4).error) && /read-scoped/.test(byId.get(4).error.message));
+  check('an assistant can ask what a repository key maps to, by that key',
+    /pull request|pull_request/.test(byId.get(5).result.content[0].text)
+    && /F-LOAD-012/.test(byId.get(5).result.content[0].text),
+    byId.get(5).result.content[0].text.slice(0, 200));
+  check('and the deck tool says the health score is not readiness',
+    /readiness/.test(byId.get(6).result.content[0].text),
+    byId.get(6).result.content[0].text.slice(0, 200));
+  check('pulling a repository is a write, so a read token is refused it',
+    !listed.includes('git.pull') && Boolean(byId.get(7).error) && /read-scoped/.test(byId.get(7).error.message));
   const audited = await db.query('SELECT tool, mode, outcome FROM mcp_audit ORDER BY id');
   check('every MCP call is audited, reads included',
     audited.some((a) => a.tool === 'portfolio.status' && a.outcome === 'ok')
@@ -762,7 +1609,7 @@ async function databaseChecks(db) {
 
   const madeProject = JSON.parse(text(2));
   eq('project.create applies the template blueprint', madeProject.created,
-    { phases: 6, versions: 3, wiki_pages: 4, work_packages: 1 });
+    { phases: 6, versions: 3, wiki_pages: 3, work_packages: 1 });
   const slf = await db.scalar("SELECT id FROM projects WHERE code = 'SLF'");
   const slfOwner = await db.scalar(`
     SELECT u.login FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.project_id = ?`, [slf]);
@@ -886,6 +1733,15 @@ async function databaseChecks(db) {
   check('the CLI shows one work package', cliShow.code === 0 && /Weighted domain rollup/.test(cliShow.out),
     cliShow.err);
   check('and names the basis of its progress figure', /basis: hours/.test(cliShow.out));
+  const cliDeck = await run(process.execPath, ['src/cli/tracker.js', 'deck'], asStephen);
+  check('the CLI prints the deck and the mapping', cliDeck.code === 0
+    && /FEATURE\s+pull request\s+implements/.test(cliDeck.out)
+    && /Neither is readiness/.test(cliDeck.out), cliDeck.err || cliDeck.out);
+  const cliLinks = await run(process.execPath, ['src/cli/tracker.js', 'links', 'F-LOAD-012'], asStephen);
+  check('and answers what one repository key maps to',
+    cliLinks.code === 0 && /pull request 978/.test(cliLinks.out) && /implements/.test(cliLinks.out),
+    cliLinks.err || cliLinks.out);
+
   const cliBad = await run(process.execPath, ['src/cli/tracker.js', 'show', 'nonsense'], asStephen);
   check('the CLI refuses a malformed key', cliBad.code !== 0 && /not a work package key/.test(cliBad.err));
   const cliAmbiguous = await run(process.execPath, ['src/cli/tracker.js', 'report'], { NO_COLOR: '1' });
@@ -1003,11 +1859,37 @@ async function httpChecks({ livingToken }) {
       ['wiki', '/api/wiki?project=1'],
       ['meetings', '/api/meetings?project=1'],
       ['connect', '/api/connect'],
+      ['deck', '/api/deck'],
+      ['deck for one project', '/api/deck?project=1'],
+      ['a work package in the repository', '/api/wp/112/git'],
+      // `#/decisions` and `#/map` both had their view functions covered and
+      // their routes exercised by hand. A route nobody calls in the suite is
+      // how a screen returns a 500 for the whole chart, which is what the
+      // Gantt did once.
+      ['decisions', '/api/decisions?project=1'],
+      ['the map', '/api/map?project=1'],
+      ['the map grouped by version', '/api/map?project=1&group=version'],
+      ['the map grouped by assignee', '/api/map?project=1&group=assignee'],
       ['admin', '/api/admin?tab=workflow'],
       ['drawer', '/api/wp/112'],
     ]) {
       const res = await request('GET', urlPath, { cookie });
       check(`GET ${name} is 200`, res.status === 200, `${res.status} ${JSON.stringify(res.json).slice(0, 200)}`);
+    }
+
+    // A grouping that silently fell back to another would draw a picture of
+    // something other than what was asked for.
+    const badGroup = await request('GET', '/api/map?project=1&group=colour', { cookie });
+    eq('an unknown grouping is refused rather than ignored', badGroup.status, 400);
+    check('and the refusal names the thing', /unknown grouping/.test(String(badGroup.json && badGroup.json.error)),
+      JSON.stringify(badGroup.json));
+    const noProject = await request('GET', '/api/map', { cookie });
+    eq('the map without a project is refused, not defaulted', noProject.status, 400);
+
+    // The map is a read path. `docs/decisions/0011`.
+    for (const method of ['POST', 'PATCH', 'DELETE']) {
+      const res = await request(method, '/api/map?project=1', { cookie, body: {} });
+      check(`${method} /api/map is not a route`, res.status === 404 || res.status === 405, String(res.status));
     }
 
     const wrongMethod = await request('DELETE', '/api/bootstrap', { cookie });
@@ -1046,6 +1928,45 @@ async function httpChecks({ livingToken }) {
     check('an xlsx export is a zip', exportXlsx.raw.slice(0, 2).toString() === 'PK');
     const exportBad = await request('GET', '/api/export/work/docx?project=1', { cookie });
     eq('an unsupported export format is 400', exportBad.status, 400);
+
+    // The webhook endpoint, through the real server and with no cookie: a forge
+    // has no session, and the signature is what stands in for one.
+    const hookEvent = {
+      action: 'closed',
+      pull_request: {
+        number: 4100, title: 'F-UI-021 through the server', state: 'closed',
+        merged_at: '2026-08-26T09:00:00Z', user: { login: 'stephen' },
+        head: { ref: 'feature/f-ui-021-http' }, base: { ref: 'main' },
+        html_url: 'https://forge.invalid/pull/4100', body: null, labels: [],
+        created_at: '2026-08-20T10:00:00Z', updated_at: '2026-08-26T09:00:00Z',
+      },
+    };
+    const hookBytes = JSON.stringify(hookEvent);
+    const hookSignature = 'sha256=' + crypto.createHmac('sha256', 'selftest-hook-secret')
+      .update(hookBytes).digest('hex');
+    const hookOk = await request('POST', '/api/hooks/git/1', {
+      body: hookEvent,
+      headers: {
+        'x-github-event': 'pull_request',
+        'x-github-delivery': 'http-4100',
+        'x-hub-signature-256': hookSignature,
+      },
+    });
+    check('a signed webhook delivery is accepted with no session at all',
+      hookOk.status === 200 && hookOk.json.state === 'applied',
+      `${hookOk.status} ${JSON.stringify(hookOk.json)}`);
+    const hookBad = await request('POST', '/api/hooks/git/1', {
+      body: hookEvent,
+      headers: {
+        'x-github-event': 'pull_request',
+        'x-github-delivery': 'http-4101',
+        'x-hub-signature-256': 'sha256=' + '0'.repeat(64),
+      },
+    });
+    eq('and an unsigned one is 401 at the same URL', hookBad.status, 401);
+    const hookNoSig = await request('POST', '/api/hooks/git/1', { body: hookEvent });
+    check('a delivery with no signature header at all is refused too',
+      hookNoSig.status === 401 && /signature/.test(hookNoSig.json.error), JSON.stringify(hookNoSig.json));
 
     const intakeNoSecret = await request('POST', '/api/intake/email', {
       body: { from: 'x@y.invalid', to: 'tasks@seedfall.local' },
@@ -1157,7 +2078,7 @@ async function main() {
 
   const before = await fingerprintRealDatabase();
 
-  pureChecks();
+  await pureChecks();
   await withTestDatabase(databaseChecks);
 
   const after = await fingerprintRealDatabase();

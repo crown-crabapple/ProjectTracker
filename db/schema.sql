@@ -1061,7 +1061,7 @@ CREATE TABLE activities (
   work_package_id BIGINT UNSIGNED NULL,
   actor_id        BIGINT UNSIGNED NULL,
   actor_label     VARCHAR(120) NULL,
-  kind            ENUM('status','comment','gate','repo','wiki','file','mention','ai','automation','sprint','member','share','version','baseline','meeting','project') NOT NULL,
+  kind            ENUM('status','comment','gate','repo','wiki','file','mention','ai','automation','sprint','member','share','version','baseline','meeting','project','decision') NOT NULL,
   verb            VARCHAR(120) NOT NULL,
   target_label    VARCHAR(190) NULL,
   detail          VARCHAR(800) NULL,

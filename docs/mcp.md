@@ -37,6 +37,25 @@ node -e "require('./src/api/mutations2').issueMcpToken({user:{id:1,is_admin:true
 The secret is shown once. Only its sha256 and its last four characters are
 stored, so it is not recoverable from the database.
 
+### The `env` block is optional, and better left out
+
+`src/config.js` loads the project's `.env` before the first query, so putting
+`PT_MCP_TOKEN` and the database settings there instead leaves the client entry as
+a command and a path — and leaves the token in the one gitignored file rather
+than in a second one. On Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ops\register-mcp.ps1 show          # print the entry, check .env has a token
+powershell -ExecutionPolicy Bypass -File ops\register-mcp.ps1 desktop-add   # write it into Claude Desktop's config
+```
+
+### It is not a service, and cannot be one
+
+There is no port, so there is nothing for a background copy to listen on. Started
+without a client attached it reads EOF on stdin and exits. "Run it as a service"
+for a stdio server means registering it with the client, which starts it on
+demand and kills it on close. `ops/README.md` has the long version.
+
 ## Without a token
 
 The server starts, answers `initialize`, and refuses every tool call with a
@@ -60,6 +79,15 @@ explains itself is findable.
 | `wiki.update` | **write** | Replace a page body. `base_revision` is required |
 | `comment.add` | **write** | A comment on a work package or a wiki page. Never internal |
 | `summary.write` | **write** | Post a generated summary to a person's My page |
+| `git.links` | read | What a work package is in the repository, asked by `WP-112` **or** by the key the repository knows it by (`F-LOAD-012`). `unmapped: true` answers the other direction: work with no forge object, and forge objects with no work package |
+| `git.deck` | read | Repositories: pull requests, issues, CI, the health score, the mapping table, the webhook state and how much work is connected |
+| `git.pull` | **write** | Pull a repository now and re-match its keys. A write because it reaches the network on the tracker's behalf and, where a repository is configured for it, can move a status. `dry_run` writes nothing |
+
+`git.deck` and `git.links` return a health score and a CI success rate. **Neither
+is progress**, and both tool descriptions say so in words an assistant reads
+before it calls them: repository hygiene and pipeline health are not readiness,
+and adding them to a completion figure is the arithmetic this tracker exists to
+avoid.
 
 A read-scoped token is **not offered** any of the write tools in `tools/list`.
 Not listing them is the more useful half of the refusal: a tool that is listed

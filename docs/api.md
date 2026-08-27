@@ -63,9 +63,13 @@ that assembles them itself will eventually get one of those rules wrong.
 | `GET /api/planner?weeks&from` | people × weeks of booked-against-capacity |
 | `GET /api/activity` | the inbox (with read state) and the feed (without) |
 | `GET /api/wiki?project&doc` | the document list, the current document, revisions, live editors, news, forum topics |
+| `GET /api/decisions?project&decision` | every decision in scope with its state, layer in the gating chain and what it blocks; the selected one in full — question, answer, rationale, the work linked to it by relation, what it depends on and what depends on it, and whether it can settle; KPIs (open, settled, superseded, work blocked, oldest open, chained); the whole gating graph by layer |
+| `GET /api/map?project&group=none\|version\|type\|assignee` | one project drawn three ways: the work-breakdown tree (collapsed by the client, every branch carrying the readiness and completion of its whole subtree), the relations graph laid out in columns with the edges that close a loop named, and the decision graph with what each decision holds up and where every link came from. Readiness and completion are separate keys at every level and are never added. `project` is required; an unknown `group` is refused. Over 150 connected work packages the relations graph reports its count and is not drawn. |
 | `GET /api/meetings?project&meeting` | the schedule and one meeting's agenda, minutes and outcomes |
 | `GET /api/connect` | integrations, repositories, revisions, the MCP surface and its audit, the email intake. **Administrator only.** |
 | `GET /api/admin?tab=fields\|workflow\|auto\|roles\|theme\|initiation` | **Administrator only.** |
+| `GET /api/deck?project&repo` | the git deck: repositories with their health score, CI summary and mapping coverage, the mirrored pull requests, issues, milestones, releases, CI runs and alerts with the work packages each is linked to, the keys that matched nothing, recent pulls, and the type → forge-object mapping table |
+| `GET /api/wp/:id/git` | what one work package is in the repository: what its type maps to, the keys it is addressable by, its links (removed ones included, marked), and its linked commits |
 | `GET /api/wp/:id` | the drawer: every attribute, relations, watchers, files, time entries, comments, shares, custom values, baseline, progress with its basis named |
 
 ## Write
@@ -108,6 +112,58 @@ that assembles them itself will eventually get one of those rules wrong.
 | `POST` | `/api/admin/mcp-tokens` | Returns the secret **once**. Only its sha256 is stored. |
 | `DELETE` | `/api/admin/mcp-tokens/:id` | |
 | `POST` | `/api/admin/initiation/:id` | `{ approve, note, code }` |
+
+## The git deck
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/api/repositories` | Connect one. `token_env` is the NAME of an environment variable and a value shaped like a token is refused with the reason. Needs `manage_repositories`. |
+| `PATCH` | `/api/repositories/:id` | Change where it is, or which variable its token comes from. |
+| `POST` | `/api/repositories/:id/pull` | **The only route that reaches the network.** Fetches, mirrors, matches, and — where the repository is configured to — moves a status through the ordinary workflow. `{ "dry_run": true }` does everything except write and is still recorded. Returns what it saw, what it linked, what it held back and every key that matched nothing. |
+| `POST` | `/api/repositories/:id/mapping` | Override what one type maps to in this repository, and optionally what a merge or a close does to it. Both status fields default to nothing. |
+| `POST` | `/api/wp/:id/ref-key` | Set the key the repository knows this work package by — `F-LOAD-012`. Unique per project; a shape no branch could carry is refused. |
+| `POST` | `/api/wp/:id/git-links` | Link by `item_id`, or by `kind` and `ref` ("PR 978"). The item must already be in the mirror: nothing here invents a forge object it has not seen. |
+| `DELETE` | `/api/git-links/:id` | Remove a link. **The row is kept** and no pull will ever re-make that link — see `docs/decisions/0008`. |
+| `POST` | `/api/hooks/git/:id` | **No session.** A forge delivery. See below. |
+
+### The webhook endpoint
+
+`POST /api/hooks/git/:id` is what a forge is pointed at. It takes no session —
+the caller is a machine elsewhere — and the signature stands in for one:
+
+- **An unsigned delivery is never accepted.** GitHub and Forgejo sign the body
+  (`X-Hub-Signature-256`, `X-Forgejo-Signature`); GitLab sends the secret back in
+  `X-Gitlab-Token`. The HMAC is computed over the **raw bytes**, before the body
+  is parsed, and compared in constant time.
+- The secret is read from the environment variable named by
+  `repositories.hook_secret_env`. A repository that names none has **no open
+  endpoint**, and says so in the refusal.
+- Both `application/json` and GitHub's `application/x-www-form-urlencoded`
+  (`payload=…`) are read; the signature is over the form body either way.
+- Bodies are bounded at 2 MB. An oversized one is refused and recorded.
+- 200 for applied and for ignored (a `ping`, a retry, an event nothing is
+  mirrored from — each with a `reason`), 401 for anything that does not verify,
+  404 for a repository that does not exist. **Every one of those is recorded** in
+  `git_hook_deliveries` with its reason, refusals included.
+- A delivery moves a work package's status only where `repositories.hook_actor_id`
+  names somebody for it to act as, and then only as far as that person's
+  permissions and the status workflow allow. With nobody named it mirrors and
+  links, and the response says a status change was implied and not made.
+
+## Decisions
+
+A decision is a record, not a wiki page — `docs/decisions/0010`. All six writes
+need `record_decisions` on the decision's project and are otherwise a 403
+`you do not have "record_decisions" on this project`.
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/api/decisions` | `{ project_id, ref, title, question, answer, rationale, owner_id, due_on, document_id, position }`. `ref` must match `/^[A-Za-z][A-Za-z0-9-]{0,23}$/` or it is a 400 `"${ref}" is not a decision ref - one letter to start, then letters, digits or dashes, up to 24 characters - D-14`. A blank title is a 400 `a decision needs a title, phrased as a question`. `ref` clashing with one already in the project is a 409 `${ref} is already used in this project`. A portfolio-wide decision (`project_id` NULL) is not created here — the same restriction `mutations2.createDocument` puts on a portfolio-wide wiki page — so a missing or non-positive `project_id` is a 400 `a decision needs a project - a portfolio-wide decision is not raised here`. Returns `{ id, ref, title, state: 'open' }`. |
+| `PATCH` | `/api/decisions/:id` | Any of `title, question, answer, rationale, state, owner_id, due_on, position, document_id, superseded_by`; any other key is a 400 naming it, `"${key}" is not an editable attribute`. An empty patch is a 400 `nothing to change`. An invalid `state` is a 400 `state must be one of open, settled, superseded`. Moving `state` to `settled` while a live dependency is still open is a 409 carrying `decisions.canSettle`'s reason, `"${ref} waits on ${refs}, which is/are still open"`. Settling records `decided_by` and `decided_at`; moving away from `settled` or `superseded` back to `open` clears both. |
+| `POST` | `/api/decisions/:id/work` | Link work to a decision, or revive a link this same endpoint removed. `{ work_package_id, relation, origin, matched_in, note }`. `relation` is one of `blocks`, `informs`, `arose_from` (default `blocks`); `origin` one of `person`, `import`, `matcher` (default `person`) and only carries `matched_in` when it is not `person`. The work package must be visible to the caller or it is a 403 `that work package is not visible to you`. Already linked is a 409 `${wp_key} is already linked to ${ref}`; a link a person removed is refused for anything but an `origin: 'person'` call, 409 `${wp_key} was unlinked from ${ref} by hand, so it is not re-linked automatically`. |
+| `DELETE` | `/api/decisions/:id/work/:wpId` | Sets `removed_at`; the row stays and is never revived by anything but a later `origin: 'person'` link. 409 `that link is already removed`. |
+| `POST` | `/api/decisions/:id/depends` | Gate `:id` on another decision. `{ depends_on_id, note }`. A decision cannot depend on itself, 400 `${ref} cannot depend on itself`. An existing live edge is a 409 `${ref} already waits on ${dependsOnRef}`. An edge that would close a loop is a 400 naming the loop by ref, checked with `decisions.wouldCycle` against every live edge in the database, not just the caller's project. |
+| `DELETE` | `/api/decisions/:id/depends/:otherId` | Sets `removed_at`; the row stays. 409 `that dependency is already removed`. |
 
 ## No account needed
 

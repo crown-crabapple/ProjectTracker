@@ -63,7 +63,10 @@ const TEMPLATES = [
     phases: PHASES.map((name, i) => ({ name, gate: `G${i + 1}`, criterion: GATES[i] })),
     versions: [{ code: 'V1', name: 'V1 slice' }, { code: 'V2', name: 'V2 — after the slice' }, { code: 'V3', name: 'V3 — someday' }],
     roles: ['Owner', 'Maintainer', 'Contributor', 'Reader'],
-    wiki: [{ number: '01', title: 'Premise' }, { number: '05', title: 'Feature inventory' }, { number: '06', title: 'Build plan' }, { number: '27', title: 'Open decisions' }],
+    // No 'Open decisions' page. A decision is a row in `decisions` and has its
+    // own screen; a blank wiki stub beside it is a second place to write one
+    // down, which is what this template used to create for every new project.
+    wiki: [{ number: '01', title: 'Premise' }, { number: '05', title: 'Feature inventory' }, { number: '06', title: 'Build plan' }],
     work_packages: [{ type: 'TASK', subject: 'Selftest — every V1 feature in exactly one milestone' }],
   }],
   ['BOOK', 'Manuscript project', 'draft phases · beat sheet wiki · codex link · beta-reader gate', {
@@ -286,7 +289,7 @@ back every few months and the answer should not have to be re-derived.
 - **V1** — in the first slice. Cannot be added to after gate 3.
 - **V2** — after the slice ships, in priority order.
 - **V3** — someday, kept for the record.
-- **TRIAGE** — waiting on a decision in §27.
+- **TRIAGE** — waiting on a decision. The decision itself is a row on the decisions screen, not a section of this document.
 - **ENG** — engineering work with no user-visible surface.
 
 ## How a feature becomes a work package
@@ -324,22 +327,6 @@ V1 date still reads honestly.
 Split in two after review: the filterable list ships first, the three-role model
 second. Automatic subject generation moved to V2 because nothing in the slice
 depends on it.`],
-  ['27', 'open-decisions', 'Open decisions', 'vw', 'DRAFT', `# Open decisions
-
-Questions that block work, each with the features that wait on it. A decision is
-settled when the answer is written in one sentence a stranger could act on.
-Reasoning goes underneath; the sentence is what gets read in six months.
-
-### D-14 · Does a deferred feature leave the denominator?
-
-Settled: yes. Deferred and rejected features are excluded from the denominator,
-so progress cannot be manufactured by deferring the hard work. Blocks WP-112.
-
-### D-19 · Can the MCP server write?
-
-Open. Read-only is enough for the summary surface, but writing a summary back to
-My page is a write. Scoped tokens would make it safe; nobody has written the
-audit format. Blocks WP-304.`],
   ['31', 'mcp-surface', 'MCP surface', 'mcp', 'DRAFT', `# MCP surface
 
 What an assistant is allowed to see, and what it may change.
@@ -347,6 +334,50 @@ What an assistant is allowed to see, and what it may change.
 Four tools. Three read. The fourth writes a generated summary to My page and is
 held behind a separate scope until the audit format exists — that is D-19, and it
 is open.`],
+];
+
+// -------------------------------------------------------------- decisions
+//
+// What `27 · open decisions` used to be. A page can hold prose but it cannot
+// say which work waits on the answer or which decision has to be answered
+// first, and those are the two questions people actually ask — so the page is
+// gone and these are rows instead, with the two link tables that draw both
+// questions.
+//
+// [ref, project, title, question, answer, rationale, state, superseded by ref]
+const DECISIONS = [
+  ['D-08', 'vw', 'Does a deferred feature count as zero progress?',
+    'The first answer to the denominator question, before the figure was found to be gameable.',
+    'Score it zero — it is out of scope for now.',
+    'Superseded once scoring zero turned out to move in both directions: deferring the hard work improved the figure, which is the opposite of what a progress number is for.',
+    'superseded', 'D-14'],
+  ['D-14', 'vw', 'Does a deferred feature leave the denominator?',
+    'A deferred feature still exists in the plan. Scoring it zero makes the percentage look worse than the plan agreed to; leaving it out of the denominator changes what the percentage is a percentage of.',
+    'Yes. Deferred and rejected features are excluded from the denominator, so progress cannot be manufactured by deferring the hard work.',
+    'A blank cell and a 0 look similar in a table and mean opposite things — excluded has to be sayable, not just inferred from a missing number.',
+    'settled', null],
+  ['D-19', 'vw', 'Can the MCP server write?',
+    'Read-only is enough for the summary surface, but writing a summary back to My page is a write. Scoped tokens would make it safe; nobody has written the audit format.',
+    null, null, 'open', null],
+  ['D-22', 'vw', 'What does the audit format for an MCP write need to record?',
+    'D-19 cannot be settled until every write a token makes has an audit format — the actor it borrowed authority from, the scope it was issued and the record a person can read back afterwards.',
+    null, null, 'open', null],
+  ['D-25', 'vw', 'Does the git deck\'s CI success rate belong in the rollup?',
+    'The deck reports a CI success rate next to the readiness percentage on the same screen. Some readers assume a percentage next to a percentage is the same kind of number, and this is that question asked directly.',
+    null, null, 'open', null],
+];
+
+// [decision ref, work package number, relation, origin, note]
+const DECISION_WORK = [
+  ['D-14', 112, 'blocks', 'person', 'The weighted domain rollup cannot close until deferred work is confirmed excluded rather than scored zero.'],
+  ['D-14', 113, 'informs', 'person', 'Shapes what the blocking-decision list is allowed to call a block.'],
+  ['D-19', 304, 'blocks', 'person', 'Token scoping and the audit log cannot be built until the write itself is decided.'],
+  ['D-08', 205, 'arose_from', 'person', 'Raised after this bug showed how easily a count is inflated by counting the same thing twice.'],
+];
+
+// [decision ref, depends on ref, note]
+const DECISION_DEPS = [
+  ['D-19', 'D-22', 'Read-only is safe without it; a write is not.'],
 ];
 
 // [name, kind, target, state, detail, project, token env var]
@@ -394,16 +425,94 @@ const CUSTOM_FIELDS = [
     ['engine', 'ui', 'content', 'loader', 'tooling', 'docs']],
   ['Slice tag', 'list', 'work_package', ['vw', 'mcp', 'cdx'], 'V1 / V2 / V3 / TRIAGE / ENG — mirrors the spec tag', 1,
     ['V1', 'V2', 'V3', 'TRIAGE', 'ENG']],
-  ['Decision ref', 'text', 'work_package', ['vw', 'cdx'], 'The §27 decision this work waits on', 0, null],
+  ['Decision ref', 'text', 'work_package', ['vw', 'cdx'], 'The decision this work waits on, by ref — see the decisions page', 0, null],
   ['Beat', 'text', 'work_package', ['ms1'], 'Beat sheet reference, e.g. A2-07', 0, null],
   ['Gate met on', 'date', 'project', null, 'Recorded when a phase gate is signed off', 1, null],
   ['Word count', 'int', 'work_package', ['ms1'], 'Filled by the ingest watcher, read-only', 0, null],
   ['Placeholder for', 'text', 'user', null, 'Who this placeholder will become', 0, null],
 ];
 
+// ------------------------------------------------------------------ the deck
+//
+// A repository as it looks after one pull, so the git deck has something to be
+// read against without anybody's token. Nothing here was fetched — it is the
+// design canvas's repository written out as rows — and the pull that recorded
+// it is seeded as a real `git_pulls` row saying how many items it saw.
+//
+// The keys are the SeedFall convention this tracker inherited: F-LOAD-012 is a
+// FEATURE in the LOAD area, and it is what PR #978 says in its title. One key,
+// F-LOAD-207, deliberately matches nothing — a branch named for work the tracker
+// has never heard of is the most useful thing a pull reports, and a demo that
+// only showed the happy case would hide the panel that says so.
+
+// [work package number, ref_key]
+const REF_KEYS = [
+  [102, 'F-LOAD-011'],
+  [103, 'F-LOAD-012'],
+  [111, 'F-UI-004'],
+  [112, 'F-UI-007'],
+  [121, 'F-UI-021'],
+  [130, 'M-V1-001'],
+];
+
+// [kind, ref, title, state, author, head_branch, base_branch, body, labels,
+//  opened days ago, updated days ago, closed days ago | null, merged days ago | null,
+//  conclusion | null, severity | null]
+const GIT_ITEMS = [
+  ['pull_request', '978', 'F-LOAD-012 parse decision blocks from the markdown ingest', 'merged',
+    'stephen', 'feature/f-load-012-decisions', 'main',
+    'Implements F-LOAD-012. Follows on from F-LOAD-011.', 'ingest', 6, 2, 2, 2, null, null],
+  ['pull_request', '981', 'Weighted rollup for the KPI strip (F-UI-007)', 'open',
+    'modell', 'feature/f-ui-007-rollup', 'main',
+    'Draft. Blocked on the decision in WP-130.', 'ui, needs-review', 3, 1, null, null, null, null],
+  ['pull_request', '984', 'Chore: bump the fixture set', 'open',
+    'rkessler', 'chore/fixtures', 'main', 'No tracker key on purpose — this is housekeeping.',
+    'chore', 2, 1, null, null, null, null],
+  ['issue', '214', 'Ingest drops a decision block that has no heading', 'open',
+    'jlin', null, null, 'Reported against F-LOAD-012. Fixes B-ENG-003.', 'bug', 5, 1, null, null, null, null],
+  ['issue', '219', 'Front-matter validation rejects a valid date', 'closed',
+    'modell', null, null, 'Closed by the fix in F-LOAD-011.', 'bug', 9, 4, 4, null, null, null],
+  ['milestone', '4', 'V1 — the tracker reads the spec', 'open', null, null, null,
+    'PH-2 build phase.', null, 30, 1, null, null, null, null],
+  ['release', 'v0.9.0', 'v0.9.0 — ingest and rollup', 'published', 'stephen', null, null,
+    'First tagged build. Releases M-V1-001.', null, 8, 8, null, null, null, null],
+  ['branch', 'feature/f-load-207-glossary', 'feature/f-load-207-glossary', 'open', null,
+    'feature/f-load-207-glossary', null, null, null, null, 1, null, null, null, null],
+  ['workflow_run', '55120', 'checks', 'completed', 'stephen', 'main', null, null, null,
+    2, 2, null, null, 'success', null],
+  ['workflow_run', '55121', 'checks', 'completed', 'modell', 'feature/f-ui-007-rollup', null, null, null,
+    1, 1, null, null, 'failure', null],
+  ['workflow_run', '55122', 'checks', 'in_progress', 'modell', 'feature/f-ui-007-rollup', null, null, null,
+    0, 0, null, null, null, null],
+  ['security_alert', '3', 'Prototype pollution in a transitive dependency', 'open', null, null, null,
+    null, null, 12, 3, null, null, null, 'moderate'],
+];
+
+// [work package number, item kind, item ref, relation, origin, matched key, matched in]
+//
+// These are what the matcher in src/domain/gitdeck.js produces from the titles,
+// bodies and branch names above. Seeded rather than derived so that the demo
+// database is the same on every machine, and checked by the selftest against the
+// matcher itself so the two cannot drift.
+const GIT_LINKS = [
+  [103, 'pull_request', '978', 'implements', 'key', 'F-LOAD-012', 'title'],
+  [102, 'pull_request', '978', 'mentions', 'key', 'F-LOAD-011', 'body'],
+  [112, 'pull_request', '981', 'implements', 'key', 'F-UI-007', 'title'],
+  [130, 'pull_request', '981', 'mentions', 'key', 'WP-130', 'body'],
+  [103, 'issue', '214', 'mentions', 'key', 'F-LOAD-012', 'body'],
+  [102, 'issue', '219', 'mentions', 'key', 'F-LOAD-011', 'body'],
+  [130, 'release', 'v0.9.0', 'releases', 'key', 'M-V1-001', 'body'],
+  // The CI runs on the branch named for F-UI-007. A run is not a pull request,
+  // so a FEATURE is only mentioned by it — which is the distinction the whole
+  // relation column exists to keep.
+  [112, 'workflow_run', '55121', 'mentions', 'branch', 'F-UI-007', 'branch'],
+  [112, 'workflow_run', '55122', 'mentions', 'branch', 'F-UI-007', 'branch'],
+];
+
 module.exports = {
   TODAY, PEOPLE, MCP_ACTOR, PROGRAMS, PHASES, GATES, PROJECTS, TEMPLATES, VERSIONS, SPRINTS,
   WPS, BASELINE_OFFSETS, WEEK_STARTS, LOAD, ACTIVITY, NOTIFICATIONS, MEETINGS, DOCS,
-  INTEGRATIONS, MCP_TOOLS, AUTOMATIONS, CUSTOM_FIELDS,
+  DECISIONS, DECISION_WORK, DECISION_DEPS,
+  INTEGRATIONS, MCP_TOOLS, AUTOMATIONS, CUSTOM_FIELDS, REF_KEYS, GIT_ITEMS, GIT_LINKS,
 };
 

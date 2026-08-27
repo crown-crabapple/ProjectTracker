@@ -121,7 +121,7 @@ async function seedDemo(ref) {
         gate_name: p.gate, gate_criterion: p.criterion,
         state, gate_met_on: metOn, gate_met_by: metOn ? user.stephen : null,
         gate_note: state === 'blocked'
-          ? 'The criterion is itself an open decision — see 27 · open decisions, D-19.'
+          ? 'The criterion is itself an open decision — see Decisions, D-19.'
           : null,
       });
     }
@@ -342,6 +342,39 @@ async function seedDemoPartTwo(ref, ctx) {
     });
   }
 
+  // --------------------------------------------------------------- decisions
+  //
+  // What `27 · open decisions` used to be, as rows rather than a page. Inserted
+  // in two passes because `superseded_by` points at another decision — D-08 at
+  // D-14 — and D-14 does not have an id until its own row exists.
+  const decision = {};   // ref -> id
+  for (const [ref, pkey, title, question, answer, rationale, state] of D.DECISIONS) {
+    decision[ref] = await db.insert('decisions', {
+      project_id: project[pkey], ref, title, question, answer, rationale, state,
+      position: Number(ref.replace(/\D/g, '')) || 0,
+      // A superseded or settled decision was decided at some point; an open one
+      // was not, so only those two states carry a decider and a date.
+      decided_by: state === 'open' ? null : user.stephen,
+      decided_at: state === 'open' ? null : minutesAgo(60 * 24 * 10),
+      created_by: user.stephen, updated_by: user.stephen,
+    });
+  }
+  for (const [ref, , , , , , , supersededByRef] of D.DECISIONS) {
+    if (!supersededByRef) continue;
+    await db.run('UPDATE decisions SET superseded_by = ? WHERE id = ?', [decision[supersededByRef], decision[ref]]);
+  }
+  for (const [ref, wpNum, relation, origin, note] of D.DECISION_WORK) {
+    await db.insert('decision_work_packages', {
+      decision_id: decision[ref], work_package_id: wp[wpNum], relation, origin, note,
+      created_by: user.stephen,
+    });
+  }
+  for (const [ref, dependsOnRef, note] of D.DECISION_DEPS) {
+    await db.insert('decision_dependencies', {
+      decision_id: decision[ref], depends_on_id: decision[dependsOnRef], note, created_by: user.stephen,
+    });
+  }
+
   // ----------------------------------------------------------------- forums
   const forum = await db.insert('forums', { project_id: project.vw, name: 'Design', description: 'Anything that is not yet a decision' });
   for (const [subject, replies, ukey] of [
@@ -496,6 +529,90 @@ async function seedDemoPartTwo(ref, ctx) {
   await db.insert('repositories', {
     project_id: project.vw, scm: 'git', name: 'local', url: '~/code/seedfall',
     default_branch: 'main', state: 'connected', detail: 'main · clean',
+  });
+
+  // ------------------------------------------------------------- the git deck
+  //
+  // The repository above as it looks after one pull. Seeded rather than fetched
+  // — nothing here has a token — so the deck, the mapping table and the drawer's
+  // repository panel all have something true to draw. `db/demo-data.js` says why
+  // one of the keys deliberately matches nothing.
+  await db.run("UPDATE repositories SET slug = 'seedfall/seedfall', pull_state = 'ok', "
+    + "pull_detail = 'pulled cleanly' WHERE id = ?", [repo]);
+
+  for (const [num, refKey] of D.REF_KEYS) {
+    await db.run('UPDATE work_packages SET ref_key = ? WHERE id = ?', [refKey, wp[num]]);
+  }
+
+  const gitItem = {};
+  for (const r of D.GIT_ITEMS) {
+    const [kind, ref2, title, state, author, head, base, bodyText, labels,
+      openedDays, updatedDays, closedDays, mergedDays, conclusion, severity] = r;
+    const days = (n) => (n === null || n === undefined ? null : minutesAgo(60 * 24 * n));
+    gitItem[`${kind}:${ref2}`] = await db.insert('git_items', {
+      repository_id: repo, kind, ref: ref2, title, state, author,
+      head_branch: head, base_branch: base, body: bodyText, labels,
+      url: kind === 'release'
+        ? `https://github.com/seedfall/seedfall/releases/tag/${ref2}`
+        : kind === 'issue'
+          ? `https://github.com/seedfall/seedfall/issues/${ref2}`
+          : kind === 'pull_request'
+            ? `https://github.com/seedfall/seedfall/pull/${ref2}`
+            : null,
+      opened_at: days(openedDays), updated_at: days(updatedDays),
+      closed_at: days(closedDays), merged_at: days(mergedDays),
+      conclusion, severity,
+      duration_sec: kind === 'workflow_run' ? 214 : null,
+      comment_count: kind === 'pull_request' || kind === 'issue' ? 3 : null,
+      pulled_at: minutesAgo(60),
+    });
+  }
+
+  for (const [num, kind, ref2, relation, origin, matchedKey, matchedIn] of D.GIT_LINKS) {
+    await db.insert('work_package_git_links', {
+      work_package_id: wp[num], git_item_id: gitItem[`${kind}:${ref2}`],
+      relation, origin, matched_key: matchedKey, matched_in: matchedIn,
+      actor_label: 'gitdeck', created_at: minutesAgo(60),
+    });
+  }
+
+  // Keys the repository used that no work package carries. Kept on purpose.
+  for (const [candidate, matchedIn, seen] of [
+    ['F-LOAD-207', 'branch', 3], ['B-ENG-003', 'body', 1], ['PH-2', 'body', 1],
+  ]) {
+    await db.insert('git_unmatched_keys', {
+      repository_id: repo, candidate, matched_in: matchedIn, seen_count: seen,
+      first_seen_at: minutesAgo(60 * 24 * 4), last_seen_at: minutesAgo(60),
+    });
+  }
+
+  // The webhook half: the variable the shared secret is read from (never the
+  // secret), the person a delivery acts as, and two deliveries — one applied and
+  // one refused, because a receiver that only ever shows the happy case hides
+  // the panel somebody actually needs at 3am.
+  await db.run(
+    "UPDATE repositories SET hook_secret_env = 'GITHUB_WEBHOOK_SECRET', hook_actor_id = ?, "
+    + "hook_state = 'ok', hook_detail = '1 new, 1 link(s)', hook_last_at = ? WHERE id = ?",
+    [user.stephen, minutesAgo(40), repo]
+  );
+  await db.insert('git_hook_deliveries', {
+    repository_id: repo, delivery_id: 'e4f1c8ad-2b19-4d0a-9d6f-0a1b2c3d4e5f',
+    event: 'pull_request', action: 'closed', state: 'applied', signature_ok: 1,
+    items_touched: 1, links_made: 1, statuses_moved: 0,
+    reason: '0 new, 1 link(s)', payload_bytes: 21874, received_at: minutesAgo(40),
+  });
+  await db.insert('git_hook_deliveries', {
+    repository_id: repo, delivery_id: '9c2d7e10-55aa-4f3b-8c21-77d9e0f1a2b3',
+    event: 'push', action: null, state: 'rejected', signature_ok: 0,
+    reason: 'the signature did not match the secret this repository names',
+    payload_bytes: 4120, received_at: minutesAgo(120),
+  });
+
+  await db.insert('git_pulls', {
+    repository_id: repo, actor_id: user.stephen, actor_label: 'gitdeck', state: 'ok',
+    started_at: minutesAgo(61), finished_at: minutesAgo(60),
+    items_seen: D.GIT_ITEMS.length, items_new: D.GIT_ITEMS.length,
+    links_made: D.GIT_LINKS.length, unmatched: 3, rate_remaining: 4863,
   });
 
   for (const [name, kind, target, state, detail, pkey, tokenEnv] of D.INTEGRATIONS) {

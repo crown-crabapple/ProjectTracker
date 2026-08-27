@@ -18,6 +18,12 @@
  *   pt baseline VW --name "..."
  *   pt sprint close S-14
  *   pt alerts run
+ *   pt decisions [--project VW]     the open decisions, what they block, and what they wait on
+ *   pt deck [--project VW]           the repositories, and how much work is mapped
+ *   pt pull [NAME] [--dry-run]      fetch a repository and re-match its keys
+ *   pt links WP-112 | F-LOAD-012    what one work package is in the repository
+ *   pt hooks [--project VW]         the webhook endpoints, and what has arrived
+ *   pt key WP-112 F-LOAD-012        the key the repository knows it by
  *   pt activity [--limit 20]
  *   pt export csv|xlsx|pdf [--project VW] [--out FILE]
  *   pt whoami
@@ -38,6 +44,10 @@ const access = require('../domain/access');
 const notify = require('../domain/notify');
 const mut = require('../api/mutations');
 const mut2 = require('../api/mutations2');
+const mut3 = require('../api/mutations3');
+const views5 = require('../api/views5');
+const views6 = require('../api/views6');
+const gitPull = require('../gitdeck/pull');
 const exporters = require('../api/exports');
 const views = require('../api/views');
 
@@ -167,6 +177,27 @@ function wpId(token) {
   const m = /^(?:WP-)?(\d+)$/i.exec(String(token || '').trim());
   if (!m) throw new Error(`"${token}" is not a work package key - expected WP-112 or 112`);
   return Number(m[1]);
+}
+
+/**
+ * 'WP-112', '112' or a key the repository knows it by — 'F-LOAD-012'.
+ *
+ * The second form is the whole point of `ref_key`: somebody reading a branch
+ * name has the repository's key, not the tracker's, and making them look up the
+ * WP number first is the friction the mapping exists to remove.
+ */
+async function resolveWorkPackage(ctx, token) {
+  const raw = String(token || '').trim();
+  if (!raw) throw new Error('which work package? e.g. `pt links WP-112` or `pt links F-LOAD-012`');
+  if (/^(?:WP-)?\d+$/i.test(raw)) return wpId(raw);
+  const clause = db.inClause(ctx.visibleProjectIds.length ? ctx.visibleProjectIds : [0]);
+  const rows = await db.query(
+    `SELECT id, project_id FROM work_packages WHERE ref_key = ? AND project_id IN ${clause.sql}`,
+    [raw.toUpperCase(), ...clause.params]
+  );
+  if (!rows.length) throw new Error(`no work package keyed "${raw}" in a project you can see`);
+  if (rows.length > 1) throw new Error(`"${raw}" is the key of ${rows.length} work packages - name the WP- key instead`);
+  return Number(rows[0].id);
 }
 
 async function projectByCode(ctx, wanted) {
@@ -527,6 +558,53 @@ const COMMANDS = {
         : '');
   },
 
+  /**
+   * The open decisions, what each is holding up, and what it is waiting on.
+   *
+   * Rust is legitimate here and nowhere else in this command: an open
+   * decision that blocks work is exactly the "needs a decision" case the
+   * colour is reserved for.
+   */
+  async decisions(ctx) {
+    const project = await projectByCode(ctx, flag('project'));
+    const data = await views6.decisions(ctx, { projectId: project ? Number(project.id) : null });
+    const open = data.decisions.filter((d) => d.state === 'open');
+    const out = [heading('Decisions')];
+
+    if (!open.length) {
+      out.push('', '  nothing open');
+    } else {
+      const idClause = db.inClause(open.map((d) => d.id));
+      const blockedRows = await db.query(`
+        SELECT dwp.decision_id, wp.wp_key FROM decision_work_packages dwp
+          JOIN work_packages wp ON wp.id = dwp.work_package_id
+         WHERE dwp.relation = 'blocks' AND dwp.removed_at IS NULL AND dwp.decision_id IN ${idClause.sql}`,
+      idClause.params);
+      const blockedByDecision = new Map();
+      for (const r of blockedRows) {
+        const list = blockedByDecision.get(Number(r.decision_id)) || [];
+        list.push(r.wp_key);
+        blockedByDecision.set(Number(r.decision_id), list);
+      }
+
+      out.push('', table(['ref', 'title', 'blocks', 'waits on'], open.map((d) => {
+        const blocked = blockedByDecision.get(d.id) || [];
+        return [
+          d.blocksCount ? W.red(d.ref) : d.ref,
+          d.title.slice(0, 48),
+          d.blocksCount ? W.red(`${d.blocksCount} (${blocked.join(', ')})`) : W.dim('nothing'),
+          d.waitingOn.length ? d.waitingOn.join(', ') : W.dim('nothing'),
+        ];
+      })));
+    }
+
+    out.push('', `  ${W.bold(String(data.kpis.settled))} settled`
+      + (data.kpis.superseded ? ` · ${data.kpis.superseded} superseded` : ''));
+    out.push(W.dim('\n  A decision is not progress - it is what is waiting on an answer, not how much'));
+    out.push(W.dim('  of the project is finished.'));
+    return out.join('\n');
+  },
+
   async activity(ctx) {
     const rows = await require('../api/views2').recentActivity(ctx, { limit: Number(flag('limit')) || 25 });
     return [
@@ -558,6 +636,199 @@ const COMMANDS = {
     return `  ${rows.length} row(s) written to ${file} (${payload.length} bytes)`;
   },
 
+  /**
+   * The repositories, and how much of the work is actually connected to them.
+   *
+   * Prints the mapping table first, because 'what does a FEATURE mean in a
+   * repository' is the question the rest of the output assumes an answer to.
+   */
+  async deck(ctx) {
+    const project = await projectByCode(ctx, flag('project'));
+    const data = await views5.deck(ctx, { projectId: project ? Number(project.id) : null });
+    const out = [heading('How work maps to the repository')];
+    out.push(table(
+      ['type', 'maps to', 'as', 'key', 'when it merges'],
+      data.mapping.map((m) => [
+        m.type,
+        m.item_kind === 'none' ? W.dim('nothing') : m.item_kind.replace('_', ' '),
+        W.dim(m.relation),
+        m.key_prefix ? `${m.key_prefix}-` : W.dim('WP- only'),
+        m.merged_status ? W.amber(`moves to ${m.merged_status}`) : W.dim('nothing - a pull mirrors'),
+      ])
+    ));
+
+    out.push(heading('Repositories'));
+    out.push(table(
+      ['repository', 'scm', 'health', 'ci', 'mapped', 'pulled'],
+      data.repositories.map((r) => [
+        `${r.name} ${W.dim(r.project_code)}`,
+        r.scm,
+        r.health
+          ? (r.health.label === 'risky' ? W.red : r.health.label === 'watch' ? W.amber : W.green)(
+            `${r.health.score} ${r.health.label}`
+          )
+          : W.dim('not pulled'),
+        r.ci.success_pct === null ? W.dim('nothing finished') : `${r.ci.success_pct}% of ${r.ci.scored}`,
+        r.coverage.items_pct === null
+          ? W.dim('nothing to map')
+          : `${r.coverage.items_linked}/${r.coverage.items}`,
+        r.pull_state === 'error' ? W.red(r.pull_detail || 'error') : W.dim(r.last_synced),
+      ]),
+      ['', '', '', 'r', 'r', '']
+    ));
+
+    const c = data.coverage;
+    out.push('');
+    out.push(`  ${W.amber(bar(c.pct === null ? 0 : c.pct))} ${W.bold((c.pct === null ? '-' : c.pct + '%'))}`
+      + ` of mappable work is connected to a repository`
+      + W.dim(`  (${c.linked}/${c.mappable}; ${c.excluded_types} work package(s) of a type that maps to nothing)`));
+    out.push(`  ${W.bold(String(c.items_unlinked))} forge object(s) belong to no work package`);
+    out.push(W.dim('\n  A health score is repository hygiene and a CI rate is a pipeline.'));
+    out.push(W.dim('  Neither is readiness, and neither enters any percentage in `pt report`.'));
+
+    if (data.unmatched.length) {
+      out.push(heading('Keys that matched nothing'));
+      out.push(table(['key', 'repository', 'seen in', 'times'],
+        data.unmatched.map((u) => [W.amber(u.candidate), u.repository, u.matched_in, String(u.seen)]),
+        ['', '', '', 'r']));
+    }
+    return out.join('\n');
+  },
+
+  /**
+   * Pull. Names a repository, or pulls every pullable one in scope.
+   *
+   * `--dry-run` fetches and matches and writes nothing, which is how you find
+   * out what a first pull would do to a project that has been tracked by hand.
+   */
+  async pull(ctx) {
+    const project = await projectByCode(ctx, flag('project'));
+    const wanted = positional[0] || null;
+    const clause = db.inClause(ctx.visibleProjectIds.length ? ctx.visibleProjectIds : [0]);
+    const repos = await db.query(`
+      SELECT r.id, r.name, r.scm, p.code AS project_code
+        FROM repositories r JOIN projects p ON p.id = r.project_id
+       WHERE r.project_id IN ${clause.sql}
+         ${project ? 'AND r.project_id = ?' : ''}
+         ${wanted ? 'AND (r.name = ? OR r.slug = ?)' : ''}
+       ORDER BY r.name`,
+    [...clause.params, ...(project ? [project.id] : []), ...(wanted ? [wanted, wanted] : [])]);
+    if (!repos.length) throw new Error(wanted ? `no repository "${wanted}" you can see` : 'no repositories');
+
+    const pullable = repos.filter((r) => ['github', 'gitlab', 'forgejo'].includes(r.scm));
+    const out = [heading(flags['dry-run'] ? 'Dry run' : 'Pull')];
+    for (const skipped of repos.filter((r) => !pullable.includes(r))) {
+      out.push(`  ${W.dim(`${skipped.name} - ${skipped.scm} has no API client, so there is nothing to pull`)}`);
+    }
+    for (const repo of pullable) {
+      try {
+        const report = await gitPull.pullRepository(ctx, repo.id, { dryRun: Boolean(flags['dry-run']) });
+        out.push(`  ${W.bold(repo.name)}  ${report.items_seen} item(s), ${report.items_new} new, `
+          + `${W.green(String(report.links_made))} link(s) made`
+          + (report.links_held ? `, ${W.amber(String(report.links_held))} held back (removed by hand)` : '')
+          + (report.unmatched.length ? `, ${W.amber(String(report.unmatched.length))} key(s) matched nothing` : '')
+          + (report.moves.length ? `, ${report.moves.length} status(es) moved` : '')
+          + (report.truncated ? W.dim(' - stopped at the page limit') : ''));
+        for (const u of report.unmatched) {
+          out.push(`    ${W.amber(u.candidate)} ${W.dim(`${u.reason} (${u.seen} sighting(s), in a ${u.matched_in})`)}`);
+        }
+        for (const p of report.problems) out.push(`    ${W.red(p)}`);
+      } catch (e) {
+        out.push(`  ${W.bold(repo.name)}  ${W.red(e.message)}`);
+      }
+    }
+    if (flags['dry-run']) out.push(W.dim('\n  Nothing was written. The pull was recorded as a dry run.'));
+    return out.join('\n');
+  },
+
+  /**
+   * The webhook endpoints, and what has arrived at them.
+   *
+   * Prints the path rather than a URL: this process does not know what it is
+   * reached as from the internet, and printing a guess is how somebody pastes
+   * localhost into a forge's settings page.
+   */
+  async hooks(ctx) {
+    const project = await projectByCode(ctx, flag('project'));
+    const data = await views5.deck(ctx, { projectId: project ? Number(project.id) : null });
+    const pullable = data.repositories.filter((r) => r.pullable);
+    const out = [heading('Webhook endpoints')];
+    out.push(table(
+      ['repository', 'path', 'secret', 'acts as', 'last'],
+      pullable.map((r) => [
+        `${r.name} ${W.dim(r.project_code)}`,
+        r.hook.secret_env ? r.hook.path : W.dim('closed - no hook_secret_env'),
+        r.hook.secret_env
+          ? (r.hook.secret_present ? W.green(`${r.hook.secret_env} set`) : W.red(`${r.hook.secret_env} NOT set`))
+          : W.dim('-'),
+        r.hook.actor ? r.hook.actor : W.dim('nobody - mirrors, moves nothing'),
+        r.hook.state === 'rejected' ? W.red(r.hook.detail || 'rejected')
+          : r.hook.last ? W.dim(r.hook.last) : W.dim('nothing yet'),
+      ])
+    ));
+    if (!pullable.length) out.push(`  ${W.dim('no repository here has an API this receiver understands')}`);
+    out.push(W.dim('\n  Prefix the path with whatever the forge can reach this server as. An unsigned'));
+    out.push(W.dim('  delivery is never accepted, so a repository with no secret has no open endpoint.'));
+
+    out.push(heading('Deliveries'));
+    out.push(data.deliveries.length
+      ? table(['state', 'repository', 'event', 'what happened', 'when'], data.deliveries.map((d) => [
+        d.state === 'rejected' ? W.red(d.state) : d.state === 'applied' ? W.green(d.state) : W.dim(d.state),
+        d.repository,
+        `${d.event || '-'}${d.action ? ' ' + d.action : ''}`,
+        String(d.reason || '').slice(0, 60),
+        W.dim(d.when),
+      ]))
+      : `  ${W.dim('nothing delivered')}`);
+    return out.join('\n');
+  },
+
+  /** What one work package is in the repository, both directions. */
+  async links(ctx) {
+    const id = await resolveWorkPackage(ctx, positional[0]);
+    const g = await views5.workPackageGit(ctx, id);
+    const out = [heading(`${g.work_package.wp_key} in the repository`), ''];
+    out.push(`  addressable as ${W.bold(g.mapping.addressable_as.join(' and '))}`);
+    out.push(`  a ${g.work_package.type} maps to `
+      + (g.mapping.item_kind === 'none' ? W.dim('nothing') : W.bold(g.mapping.item_kind.replace('_', ' ')))
+      + (g.mapping.example ? W.dim(`  (${g.mapping.example})`) : ''));
+    out.push('');
+    const live = g.links.filter((l) => !l.removed);
+    out.push(live.length
+      ? table(['what', 'state', 'as', 'matched on', 'where', 'when'], live.map((l) => [
+        `${l.kind.replace('_', ' ')} ${l.ref}`,
+        l.state,
+        l.relation,
+        l.matched_key || W.dim('by hand'),
+        l.matched_in,
+        W.dim(l.when),
+      ]))
+      : `  ${W.dim(g.mapping.item_kind === 'none'
+        ? 'nothing linked, and nothing expected'
+        : `no ${g.mapping.item_kind.replace('_', ' ')} carries this key yet`)}`);
+    if (g.revisions.length) {
+      out.push(heading('Commits'));
+      out.push(table(['commit', 'message', 'author', 'when'], g.revisions.map((r) => [
+        r.identifier, String(r.message || '').split('\n')[0].slice(0, 60), r.author || '', W.dim(r.when),
+      ])));
+    }
+    const removed = g.links.filter((l) => l.removed);
+    if (removed.length) {
+      out.push('', W.dim(`  ${removed.length} link(s) removed by hand and kept. A pull will not re-make them.`));
+    }
+    return out.join('\n');
+  },
+
+  /** Set the key the repository knows a work package by. */
+  async key(ctx) {
+    const id = await resolveWorkPackage(ctx, positional[0]);
+    const wanted = positional[1];
+    if (wanted === undefined) throw new Error('which key? e.g. `pt key WP-112 F-LOAD-012` (empty clears it)');
+    const out = await mut3.setRefKey(ctx, id, wanted === '-' ? null : wanted);
+    return `  WP-${id} is ${out.ref_key ? W.bold(out.ref_key) : W.dim('no longer keyed')} in the repository`;
+  },
+
+
   async whoami(ctx) {
     const perms = ctx.visibleProjectIds.length
       ? await access.permissionsFor(ctx.user.id, ctx.visibleProjectIds[0]) : new Set();
@@ -585,6 +856,12 @@ const COMMANDS = {
       ['baseline VW', '--name "..." - a copy of every date, never recomputed'],
       ['sprint [close S-14]', 'list sprints, or close one'],
       ['alerts [run]', 'the date alert rules, or evaluate them now'],
+      ['decisions [--project VW]', 'the open decisions, what they block, and what they wait on'],
+      ['deck [--project VW]', 'the repositories, health, CI and how much work is mapped'],
+      ['pull [NAME]', '--dry-run fetches and matches without writing'],
+      ['links WP-112', 'what it is in the repository - a repository key works too'],
+      ['hooks [--project VW]', 'the webhook endpoints, the secret variable, and what has arrived'],
+      ['key WP-112 F-LOAD-012', 'the key the repository knows it by; - clears it'],
       ['activity', '--limit N'],
       ['export csv|xlsx|pdf', '--project VW --out FILE'],
       ['whoami', 'who the command runs as'],

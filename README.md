@@ -71,8 +71,9 @@ has the argument.
 | **Planning & scheduling** — Gantt, work packages, relations and hierarchies, automatic and manual scheduling, work-week definitions, resource management, baseline comparison, calendar, date alerts, team planner, organisations | `#/gantt`, `#/calendar`, `#/planner` · `src/domain/scheduling.js`, `baselines`, `work_weeks`, `resource_allocations`, `date_alerts`, `organizations` |
 | **Task management & issue tracking** — filterable lists, assignee / accountable / watcher, automatic subject generation, real-time notifications, sharing outside a project, file management, email-to-task, attribute highlighting, export | `#/work`, the drawer · `src/domain/subject.js`, `work_package_shares`, `attachments`, `email_intake`, `src/api/exports.js` |
 | **Agile, Kanban & Scrum** — status / version / subproject / work-breakdown / sprint boards, backlogs, sprints shared across projects (SAFe), story points, several active sprints | `#/boards`, `#/backlogs` · `boards`, `sprints`, `sprint_projects` |
-| **Team collaboration** — activity feeds, collaborative document editing, meetings with agendas and minutes, news, @mentions, internal comments, wiki, forums, XWiki link | `#/activity`, `#/wiki`, `#/meetings` · `documents`, `document_presence`, `meetings`, `news`, `forums`, `comments.internal` |
-| **Roadmap & release planning** — version progress, one product timeline, Git and Subversion repositories, GitHub and GitLab integrations | `#/roadmap`, `#/connect` · `versions`, `repositories`, `integrations` |
+| **Team collaboration** — activity feeds, collaborative document editing, meetings with agendas and minutes, news, @mentions, internal comments, wiki, decisions as records rather than pages, forums, XWiki link | `#/activity`, `#/wiki`, `#/decisions`, `#/meetings` · `documents`, `document_presence`, `meetings`, `news`, `forums`, `comments.internal`, `decisions` |
+| **Seeing the shape of a project** — the work breakdown as a tree, what comes before what, and which decisions gate which, with readiness and completion side by side at every level | `#/map` · `src/api/views7.js`, `src/domain/graph.js` |
+| **Roadmap & release planning** — version progress, one product timeline, Git and Subversion repositories, GitHub, GitLab and Forgejo pulled into a git deck with the work mapped both ways | `#/roadmap`, `#/deck`, `#/connect` · `versions`, `repositories`, `git_items`, `work_package_git_links`, `src/gitdeck/` |
 | **Workflows & customisation** — automated project initiation, status workflows, custom actions, custom themes, form configuration, attribute help texts, unlimited custom fields, fine-grained roles / permissions / groups, placeholder users | `#/admin` · `status_transitions`, `automations`, `themes`, `form_configurations`, `custom_fields`, `roles`, `users.kind = 'placeholder'` |
 | **Other** — MCP server for AI assistants, responsive design | `src/mcp/server.js`, `public/app.css` |
 
@@ -92,6 +93,8 @@ node db/migrate.js --no-login   # apply migrations and create no login
 node db/seed.js                 # reference data + demo portfolio
 node db/seed.js --reference     # reference data only — safe on a live database
 node db/import-state.js FILE    # import a SeedFall tracker state file (--dry-run first)
+node src/cli/tracker.js pull    # fetch a repository and re-match its keys (--dry-run first)
+node src/cli/tracker.js decisions # the open decisions, what they block, and what they wait on
 npm start                     # the web server
 npm test                      # the selftest, against a throwaway database
 node src/cli/tracker.js help  # the command line
@@ -101,6 +104,112 @@ node src/mcp/server.js        # the MCP server, on stdio
 `schema.sql` is the base and is applied only to an empty schema. Once a database
 exists, changes arrive as numbered files in `db/migrations/` — editing
 `schema.sql` to change a live table is the mistake that split makes impossible.
+
+### Unattended, on Windows
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ops\service.ps1 install       # web server, as SYSTEM, at boot
+powershell -ExecutionPolicy Bypass -File ops\service.ps1 status
+powershell -ExecutionPolicy Bypass -File ops\register-mcp.ps1 show     # how to register the MCP server
+```
+
+The web server runs as a **scheduled task** rather than an SCM service, because
+`node.exe` implements no service control handler and the wrappers that make it
+one are a new dependency. The MCP server **cannot** be a service at all: it is
+stdio, so there is no port for anything to connect to, and the client launches
+it. `ops/README.md` has both arguments in full.
+
+## The git deck
+
+`#/deck` is [gitdeck](https://github.com/debba/gitdeck)'s dashboard — a repository
+grid with a health score, cross-repository pull requests and issues, CI health, a
+security summary and a daily digest — ported into this app's shape, plus the
+thing a tracker needs that a dashboard does not: **the mapping**.
+
+Each of the six work package types declares what it *is* in a repository:
+
+| Type | Maps to | As | Key |
+|---|---|---|---|
+| PHASE | milestone | tracks | `PH-` |
+| EPIC | issue | tracks | `E-` |
+| FEATURE | **pull request** | implements | `F-` |
+| TASK | issue | implements | `T-` |
+| BUG | issue | fixes | `B-` |
+| MILESTONE | release | releases | `M-` |
+
+So `F-LOAD-012` maps to pull request #978. A work package is addressable by its
+own key (`WP-124`, generated from the id) **and** by the key its repository knows
+it as (`work_packages.ref_key` — `F-LOAD-012`), which is what a branch name, a
+pull request title or a commit message actually carries. A pull reads titles,
+bodies and branch names, matches both forms, and records on every link the key
+that matched and where it was found.
+
+```bash
+node src/cli/tracker.js deck                 # repositories, health, CI, how much is mapped
+node src/cli/tracker.js pull --dry-run       # fetch and match, write nothing
+node src/cli/tracker.js pull seedfall/seedfall
+node src/cli/tracker.js links F-LOAD-012     # what one work package is in the repository
+node src/cli/tracker.js key WP-112 F-UI-007  # the key the repository knows it by
+```
+
+Six properties are worth knowing before switching it on:
+
+- **No credential is stored.** A repository records the *name* of an environment
+  variable; the token is read from `process.env` at the moment of the call. A
+  database dump carries no secret, and the deck reports whether the variable is
+  set. This is also why there is no OAuth device flow: it exists to obtain and
+  store a token, and there is nowhere here to store one.
+- **A pull mirrors, it does not decide.** Out of the box it changes no work
+  package's status. A repository can be configured so that a merge moves one, and
+  even then the move goes through the same status workflow the web app uses and
+  is refused if the workflow refuses it.
+- **A link a person removes is never re-made.** The row is kept, and the puller
+  holds that pair back for ever. An integration that overturns a decision every
+  quarter of an hour is one nobody leaves on.
+- **A key in a title or a branch is a claim; a key in a body is a mention** until
+  a closing verb claims it. `blocked on WP-112` and `closes WP-112` are opposite
+  sentences.
+- **A key that matches nothing is kept and listed**, with how many times it was
+  seen. A branch named for work the tracker has never heard of is the most useful
+  thing a pull can tell you.
+- **A health score is not readiness.** Neither is a CI success rate. They are
+  repository hygiene and pipeline health, they never enter the portfolio's
+  percentages, and every surface that shows them says so.
+
+### Webhooks
+
+A forge can also tell the tracker as things happen, rather than waiting to be
+asked. Point it at `POST /api/hooks/git/<repository id>` — the deck shows the
+full URL, and `pt hooks` prints the path:
+
+```bash
+node src/cli/tracker.js hooks          # the endpoints, the secret variable, what has arrived
+```
+
+- **An unsigned delivery is never accepted.** The URL is not a secret — it is in
+  the forge's settings page and on the deck — so the signature is what stands
+  between the internet and somebody's plan. GitHub and Forgejo sign the body,
+  GitLab sends the secret back in a header; either way the HMAC is over the raw
+  bytes and the comparison is constant time.
+- **A repository that names no secret has no open endpoint.** Set
+  `hook_secret_env` to the NAME of an environment variable holding the shared
+  secret — the same rule as the API token, so nothing lands in the database.
+- **A delivery moves a status only where the repository names somebody for it to
+  act as** (`hook_actor_id`). Nobody starts a webhook, so a change needs somebody
+  answerable for it; it can do no more than that person could by hand, and the
+  trail records `gitdeck · webhook` instead of them. With nobody named, a delivery
+  mirrors and links and says a status change was implied and not made.
+- **Every delivery is kept with its reason, refusals included.** "The forge says
+  it delivered and the tracker shows nothing" is otherwise unanswerable. A retry
+  keeps its own row saying it was ignored.
+- Deliveries go through the puller's own write path, so a pull request that
+  arrives by webhook and the same one fetched an hour later produce the same row.
+
+There is **still no scheduler**. A webhook covers what changes; `pt pull` is what
+reconciles a repository afterwards — a delivery missed while the server was
+restarting is missed for good, and the deck's "pulled 3 days ago" is what makes
+that visible. Put the CLI in cron if you want it hourly.
+`docs/decisions/0008` and `0009` have the argument for all of it.
 
 ## The command line
 
@@ -128,7 +237,7 @@ ambient superuser, so the CLI cannot do something the web app would refuse.
 
 ## The MCP server
 
-stdio, JSON-RPC 2.0, twelve tools — four that read and eight that write.
+stdio, JSON-RPC 2.0, fifteen tools — six that read and nine that write.
 `docs/mcp.md` has the client configuration.
 
 Five properties, each of which is the answer to a question somebody will ask:
@@ -157,10 +266,12 @@ The SeedFall tracker keeps its state as one JSON document: a feature ledger, a
 decision log, the answers to the questions it asked, and a rolling activity
 trail. Its status vocabulary is this app's, so a feature imports as itself.
 
-Features become work packages, questions become comments on the feature they
-name, decisions become one wiki page each with their state as the page's status,
-and the trail imports with its original timestamps and its original actor labels
-— `claude` and `browser` are not accounts here, and stay labels.
+Features become work packages — carrying the feature id as their **repository
+key**, so a branch called `feature/f-load-012-decisions` finds one after the
+import — questions become comments on the feature they name, decisions become
+one row in `decisions` each with their state carried across, and the trail
+imports with its original timestamps and its original actor labels — `claude`
+and `browser` are not accounts here, and stay labels.
 
 It **merges**. Run it again with a newer file and it moves the statuses that
 changed, appends the trail entries it has not seen, and writes the new decisions.
