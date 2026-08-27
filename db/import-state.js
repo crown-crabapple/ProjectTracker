@@ -22,8 +22,11 @@
  *   questions  a comment on the feature they name. The file keeps the answer and
  *              not the question, and the comment says so rather than presenting
  *              half a conversation as a whole one.
- *   decisions  one wiki page each, numbered D25 and titled from its answer, plus
- *              an index page that puts the unsettled ones first.
+ *   decisions  one row in `decisions` each, ref D25, titled from its answer, the
+ *              answer and the note carried as `answer` and `rationale`. Not a
+ *              wiki page: db/migrations/0004_decisions.sql moves a database's
+ *              existing one-page-per-decision documents into the same table,
+ *              which is the argument for not writing new ones here.
  *   activity   the activity trail, with the original timestamps and the original
  *              actor labels ('claude', 'browser'). Neither is an account here,
  *              so both stay labels: an imported change is never attributed to a
@@ -106,14 +109,6 @@ function titleFrom(text, fallback) {
   const first = stop > 0 && stop <= 110 ? s.slice(0, stop) : s;
   return first.length <= 110 ? first : `${first.slice(0, 109)}…`;
 }
-
-const measure = (text) => {
-  const s = String(text || '');
-  return {
-    word_count: s.trim() ? s.trim().split(/\s+/).length : 0,
-    section_count: (s.match(/^#{1,6} /gm) || []).length,
-  };
-};
 
 // ------------------------------------------------------------------ the file
 
@@ -410,88 +405,40 @@ async function importInto(tx, { state, ref, owner, code, actorLabel }) {
   }
 
   // ---------------------------------------------------------------- decisions
+  //
+  // A decision becomes one row in `decisions`, not a wiki page: a page cannot
+  // say which work waits on it or which decision has to be answered first.
+  // No index page either — the decisions screen replaces it. An index page an
+  // older import wrote is left alone, the same rule as everything else here:
+  // nothing is deleted, it simply stops being what anyone reads for the list.
   const decisionIds = Object.keys(state.decisions).sort(
     (a, b) => (Number(a.replace(/\D/g, '')) || 0) - (Number(b.replace(/\D/g, '')) || 0)
   );
   for (const decisionId of decisionIds) {
     const decision = state.decisions[decisionId];
-    const slug = decisionId.toLowerCase();
     const title = titleFrom(decision.answer || decision.note, decisionId);
-    const body = [
-      `# ${decisionId} — ${title}`,
-      '',
-      `**State:** ${decision.state}${decision.updated ? ` · updated ${decision.updated.slice(0, 10)}` : ''}`,
-      '',
-      decision.answer ? '## What was decided\n' : '## No answer recorded\n',
-      decision.answer || 'The state file carries this decision with a note and no answer.',
-      '',
-      ...(decision.note ? ['## Why', '', decision.note, ''] : []),
-      `Imported from the ${state.project} state file.`,
-    ].join('\n');
-    const known = await tx.one('SELECT id, body FROM documents WHERE project_id = ? AND slug = ?',
-      [project.id, slug]);
-    const counts = measure(body);
-    if (!known) {
-      await tx.insert('documents', {
-        project_id: project.id, number: decisionId, slug, title,
-        body, status: String(decision.state).toUpperCase(), ...counts,
-        position: Number(decisionId.replace(/\D/g, '')) || 0,
-        created_by: owner.id, updated_by: owner.id,
-      });
-      report.decisions.created += 1;
-    } else if (known.body !== body) {
-      await tx.update('documents', known.id, {
-        title, body, status: String(decision.state).toUpperCase(), ...counts, updated_by: owner.id,
-      });
-      // A revision row, so the page has the history the wiki's own save path
-      // gives it — and so wiki.update over MCP has a base revision to refuse
-      // against rather than a page that looks untouched.
-      const revision = Number(await tx.scalar(
-        'SELECT COALESCE(MAX(revision), 0) FROM document_versions WHERE document_id = ?', [known.id]
-      )) + 1;
-      await tx.insert('document_versions', {
-        document_id: known.id, revision, body, author_id: null,
-        note: `imported from the ${state.project} state file`,
-      });
-      report.decisions.updated += 1;
-    } else {
-      report.decisions.unchanged += 1;
-    }
-  }
+    const answer = decision.answer || null;
+    const rationale = decision.note || null;
+    const state_ = String(decision.state) === 'settled' ? 'settled' : 'open';
+    const position = Number(decisionId.replace(/\D/g, '')) || 0;
 
-  if (decisionIds.length) {
-    const unsettled = decisionIds.filter((id) => state.decisions[id].state !== 'settled');
-    const indexBody = [
-      '# Decisions',
-      '',
-      `${decisionIds.length} decisions imported from the ${state.project} state file, one page each, `
-      + 'numbered as they are numbered there.',
-      '',
-      '## Waiting on a person',
-      '',
-      ...(unsettled.length
-        ? unsettled.map((id) => `- **${id}** (${state.decisions[id].state}) — `
-          + `${titleFrom(state.decisions[id].answer || state.decisions[id].note, 'no answer recorded')}`)
-        : ['None. Every imported decision is settled.']),
-      '',
-      '## Settled',
-      '',
-      `${decisionIds.length - unsettled.length} of them. They are the numbered pages in this wiki; `
-      + 'this page lists only the ones that are not finished, because a list of everything is a list '
-      + 'nobody reads twice.',
-    ].join('\n');
-    const known = await tx.one("SELECT id, body FROM documents WHERE project_id = ? AND slug = 'decisions'",
-      [project.id]);
-    const counts = measure(indexBody);
+    const known = await tx.one(
+      'SELECT id, title, answer, rationale, state FROM decisions WHERE project_id = ? AND ref = ?',
+      [project.id, decisionId]
+    );
     if (!known) {
-      await tx.insert('documents', {
-        project_id: project.id, number: '00', slug: 'decisions', title: 'Decisions',
-        body: indexBody, status: 'INDEX', ...counts, position: 0,
-        created_by: owner.id, updated_by: owner.id,
+      await tx.insert('decisions', {
+        project_id: project.id, ref: decisionId, title, answer, rationale, state: state_,
+        position, created_by: owner.id, updated_by: owner.id,
       });
       report.decisions.created += 1;
-    } else if (known.body !== indexBody) {
-      await tx.update('documents', known.id, { body: indexBody, ...counts, updated_by: owner.id });
+    } else if (
+      known.title !== title || (known.answer || null) !== answer
+      || (known.rationale || null) !== rationale || known.state !== state_
+    ) {
+      await tx.update('decisions', known.id, {
+        title, answer, rationale, state: state_, updated_by: owner.id,
+      });
       report.decisions.updated += 1;
     } else {
       report.decisions.unchanged += 1;
@@ -556,7 +503,7 @@ async function importInto(tx, { state, ref, owner, code, actorLabel }) {
     target_label: code,
     detail: cut(changed
       ? `${report.features.created} feature(s) added, ${report.features.statusChanged.length} moved status, `
-        + `${report.decisions.created + report.decisions.updated} decision page(s) written, `
+        + `${report.decisions.created + report.decisions.updated} decision(s) written, `
         + `${report.activity.created} trail entr(ies) added`
         + `${state.updated ? ` · state of ${state.updated.slice(0, 10)}` : ''}`
       : `nothing changed — the tracker already matched the file${state.updated ? ` of ${state.updated.slice(0, 10)}` : ''}`,
@@ -670,7 +617,7 @@ async function main() {
     console.log(`              ${report.questions.orphans.length} answered question(s) name a feature the `
       + `file does not carry, and were skipped: ${report.questions.orphans.join(', ')}`);
   }
-  console.log(`  decisions   ${report.decisions.created} pages created · ${report.decisions.updated} updated · `
+  console.log(`  decisions   ${report.decisions.created} decision(s) created · ${report.decisions.updated} updated · `
     + `${report.decisions.unchanged} unchanged`);
   console.log(`  activity    ${report.activity.created} entries written · `
     + `${report.activity.alreadyThere} already there`);

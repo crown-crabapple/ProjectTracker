@@ -121,7 +121,7 @@ async function seedDemo(ref) {
         gate_name: p.gate, gate_criterion: p.criterion,
         state, gate_met_on: metOn, gate_met_by: metOn ? user.stephen : null,
         gate_note: state === 'blocked'
-          ? 'The criterion is itself an open decision — see 27 · open decisions, D-19.'
+          ? 'The criterion is itself an open decision — see Decisions, D-19.'
           : null,
       });
     }
@@ -339,6 +339,39 @@ async function seedDemoPartTwo(ref, ctx) {
   for (const ukey of ['stephen', 'odell']) {
     await db.insert('document_presence', {
       document_id: doc['feature-inventory'], user_id: user[ukey], section: 'Tags', base_revision: 1,
+    });
+  }
+
+  // --------------------------------------------------------------- decisions
+  //
+  // What `27 · open decisions` used to be, as rows rather than a page. Inserted
+  // in two passes because `superseded_by` points at another decision — D-08 at
+  // D-14 — and D-14 does not have an id until its own row exists.
+  const decision = {};   // ref -> id
+  for (const [ref, pkey, title, question, answer, rationale, state] of D.DECISIONS) {
+    decision[ref] = await db.insert('decisions', {
+      project_id: project[pkey], ref, title, question, answer, rationale, state,
+      position: Number(ref.replace(/\D/g, '')) || 0,
+      // A superseded or settled decision was decided at some point; an open one
+      // was not, so only those two states carry a decider and a date.
+      decided_by: state === 'open' ? null : user.stephen,
+      decided_at: state === 'open' ? null : minutesAgo(60 * 24 * 10),
+      created_by: user.stephen, updated_by: user.stephen,
+    });
+  }
+  for (const [ref, , , , , , , supersededByRef] of D.DECISIONS) {
+    if (!supersededByRef) continue;
+    await db.run('UPDATE decisions SET superseded_by = ? WHERE id = ?', [decision[supersededByRef], decision[ref]]);
+  }
+  for (const [ref, wpNum, relation, origin, note] of D.DECISION_WORK) {
+    await db.insert('decision_work_packages', {
+      decision_id: decision[ref], work_package_id: wp[wpNum], relation, origin, note,
+      created_by: user.stephen,
+    });
+  }
+  for (const [ref, dependsOnRef, note] of D.DECISION_DEPS) {
+    await db.insert('decision_dependencies', {
+      decision_id: decision[ref], depends_on_id: decision[dependsOnRef], note, created_by: user.stephen,
     });
   }
 

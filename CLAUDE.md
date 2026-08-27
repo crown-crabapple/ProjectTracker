@@ -12,7 +12,7 @@ Read `README.md` first, then `context-map.md`. This file is the rules.
 1. This file.
 2. `context-map.md` — where everything lives, and which layer owns what. Check it
    before searching blind.
-3. `docs/decisions/` — the five decisions that would otherwise be re-derived.
+3. `docs/decisions/` — the ten decisions that would otherwise be re-derived.
    `0002` (the progress model) is the one that touches the most code.
 4. `docs/features.md` — the brief's feature list mapped to code, with every gap
    named. **Read this before claiming something works.**
@@ -145,6 +145,28 @@ coverage. None of them is progress, none enters a denominator in `rollup.js`, an
 every surface that shows one says which is which. This is the same mistake as the
 SeedFall *built* figure, one layer out.
 
+### A decision is a record, and a link carries its origin
+
+`decisions` is not a wiki page: a page cannot say what waits on a decision or
+what it waits on, and those are the two questions people actually ask.
+`decision_work_packages` and `decision_dependencies` carry those relations, and
+`src/domain/decisions.js` walks both graphs exactly once. A link to a decision
+carries its `origin` — `person`, `import` or `matcher` — the same rule the git
+deck's links run on, and a link somebody removed is never revived by anything
+but another person. A dependency that would close a cycle is refused where it
+is written, not when a settle later finds it impossible. `docs/decisions/0010`.
+
+### The map draws no number of its own
+
+`#/map` is a picture, not a source. Every figure on it comes from `rollup.js` and
+every rank from `src/domain/graph.js` — which is now the one layering walk in the
+product, with `decisions.layer` delegating to it. Readiness and completion are
+drawn side by side at every level and never added, because a lone bar reading 60%
+is read as "sixty per cent finished" by everybody who has not read `0002`. The map
+writes nothing: a drag that re-parented a work package would be a new call site
+for every workflow, cycle and origin rule, at a screen that exists to draw.
+`docs/decisions/0011`.
+
 ### Automations fire after the commit, never inside it
 
 One that ran inside would see uncommitted state; one that failed would roll back
@@ -237,7 +259,7 @@ node src/cli/tracker.js deck              # repositories, health, CI, what is ma
 node src/cli/tracker.js pull [--dry-run]  # fetch a repository, re-match its keys
 node src/cli/tracker.js hooks             # the webhook endpoints, and what has arrived
 npm start                               # the web server
-npm test                                # 356 checks, throwaway database
+npm test                                # 425 checks, throwaway database
 node src/cli/tracker.js help
 node src/mcp/server.js                  # stdio
 ```

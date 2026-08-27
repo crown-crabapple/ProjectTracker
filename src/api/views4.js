@@ -27,6 +27,10 @@ async function wiki(ctx, { projectId = null, slug = null } = {}) {
              WHERE pr.document_id = d.id AND pr.last_seen > DATE_SUB(NOW(), INTERVAL 5 MINUTE)) AS editing
       FROM documents d LEFT JOIN projects p ON p.id = d.project_id
      WHERE ${where}
+       -- This page's content is now a decision record: showing it in both the
+       -- wiki index and on #/decisions is how the two come to disagree about
+       -- what a decision means.
+       AND NOT EXISTS (SELECT 1 FROM decisions x WHERE x.document_id = d.id)
      ORDER BY d.position, d.number, d.title`, params);
 
   const current = slug

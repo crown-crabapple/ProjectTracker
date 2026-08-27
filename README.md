@@ -71,7 +71,8 @@ has the argument.
 | **Planning & scheduling** — Gantt, work packages, relations and hierarchies, automatic and manual scheduling, work-week definitions, resource management, baseline comparison, calendar, date alerts, team planner, organisations | `#/gantt`, `#/calendar`, `#/planner` · `src/domain/scheduling.js`, `baselines`, `work_weeks`, `resource_allocations`, `date_alerts`, `organizations` |
 | **Task management & issue tracking** — filterable lists, assignee / accountable / watcher, automatic subject generation, real-time notifications, sharing outside a project, file management, email-to-task, attribute highlighting, export | `#/work`, the drawer · `src/domain/subject.js`, `work_package_shares`, `attachments`, `email_intake`, `src/api/exports.js` |
 | **Agile, Kanban & Scrum** — status / version / subproject / work-breakdown / sprint boards, backlogs, sprints shared across projects (SAFe), story points, several active sprints | `#/boards`, `#/backlogs` · `boards`, `sprints`, `sprint_projects` |
-| **Team collaboration** — activity feeds, collaborative document editing, meetings with agendas and minutes, news, @mentions, internal comments, wiki, forums, XWiki link | `#/activity`, `#/wiki`, `#/meetings` · `documents`, `document_presence`, `meetings`, `news`, `forums`, `comments.internal` |
+| **Team collaboration** — activity feeds, collaborative document editing, meetings with agendas and minutes, news, @mentions, internal comments, wiki, decisions as records rather than pages, forums, XWiki link | `#/activity`, `#/wiki`, `#/decisions`, `#/meetings` · `documents`, `document_presence`, `meetings`, `news`, `forums`, `comments.internal`, `decisions` |
+| **Seeing the shape of a project** — the work breakdown as a tree, what comes before what, and which decisions gate which, with readiness and completion side by side at every level | `#/map` · `src/api/views7.js`, `src/domain/graph.js` |
 | **Roadmap & release planning** — version progress, one product timeline, Git and Subversion repositories, GitHub, GitLab and Forgejo pulled into a git deck with the work mapped both ways | `#/roadmap`, `#/deck`, `#/connect` · `versions`, `repositories`, `git_items`, `work_package_git_links`, `src/gitdeck/` |
 | **Workflows & customisation** — automated project initiation, status workflows, custom actions, custom themes, form configuration, attribute help texts, unlimited custom fields, fine-grained roles / permissions / groups, placeholder users | `#/admin` · `status_transitions`, `automations`, `themes`, `form_configurations`, `custom_fields`, `roles`, `users.kind = 'placeholder'` |
 | **Other** — MCP server for AI assistants, responsive design | `src/mcp/server.js`, `public/app.css` |
@@ -93,6 +94,7 @@ node db/seed.js                 # reference data + demo portfolio
 node db/seed.js --reference     # reference data only — safe on a live database
 node db/import-state.js FILE    # import a SeedFall tracker state file (--dry-run first)
 node src/cli/tracker.js pull    # fetch a repository and re-match its keys (--dry-run first)
+node src/cli/tracker.js decisions # the open decisions, what they block, and what they wait on
 npm start                     # the web server
 npm test                      # the selftest, against a throwaway database
 node src/cli/tracker.js help  # the command line
@@ -102,6 +104,20 @@ node src/mcp/server.js        # the MCP server, on stdio
 `schema.sql` is the base and is applied only to an empty schema. Once a database
 exists, changes arrive as numbered files in `db/migrations/` — editing
 `schema.sql` to change a live table is the mistake that split makes impossible.
+
+### Unattended, on Windows
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ops\service.ps1 install       # web server, as SYSTEM, at boot
+powershell -ExecutionPolicy Bypass -File ops\service.ps1 status
+powershell -ExecutionPolicy Bypass -File ops\register-mcp.ps1 show     # how to register the MCP server
+```
+
+The web server runs as a **scheduled task** rather than an SCM service, because
+`node.exe` implements no service control handler and the wrappers that make it
+one are a new dependency. The MCP server **cannot** be a service at all: it is
+stdio, so there is no port for anything to connect to, and the client launches
+it. `ops/README.md` has both arguments in full.
 
 ## The git deck
 
@@ -252,9 +268,10 @@ trail. Its status vocabulary is this app's, so a feature imports as itself.
 
 Features become work packages — carrying the feature id as their **repository
 key**, so a branch called `feature/f-load-012-decisions` finds one after the
-import — questions become comments on the feature they name, decisions become one wiki page each with their state as the page's status,
-and the trail imports with its original timestamps and its original actor labels
-— `claude` and `browser` are not accounts here, and stay labels.
+import — questions become comments on the feature they name, decisions become
+one row in `decisions` each with their state carried across, and the trail
+imports with its original timestamps and its original actor labels — `claude`
+and `browser` are not accounts here, and stay labels.
 
 It **merges**. Run it again with a newer file and it moves the statuses that
 changed, appends the trail entries it has not seen, and writes the new decisions.

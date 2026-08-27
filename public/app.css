@@ -630,6 +630,97 @@ tbody tr:last-child td { border-bottom: none; }
 .prose td, .prose th { font-size: 12px; }
 .prose hr { border: none; border-top: 1px solid var(--line); margin: 24px 0; }
 
+/* ------------------------------------------------------------------ decisions */
+
+/* Same three-column rail / body / rail idiom as .wiki, kept as its own rule
+   rather than shared, so the two screens can drift independently. */
+.decisions { display: grid; grid-template-columns: 250px minmax(0, 1fr) 244px; min-height: 100%; }
+.decisions-rail { border-right: 1px solid var(--line); background: var(--rail); padding: 18px 10px 60px; }
+.decisions-rail.right { border-right: none; border-left: 1px solid var(--line); padding: 24px 18px 60px; }
+.decisions-body { padding: 24px 38px 90px; min-width: 0; }
+
+.decisions-item {
+  display: flex; flex-direction: column; gap: 4px; padding: 7px 8px;
+  border-radius: 4px; cursor: pointer; font: 400 12px var(--font-prose);
+  border: none; background: none; width: 100%; text-align: left; color: var(--ink-4);
+}
+.decisions-item:hover { background: var(--wash); }
+.decisions-item.is-current { background: var(--wash); }
+.decisions-item .top { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.decisions-item .top .title { flex: 1; min-width: 60px; color: var(--ink-2); }
+.decisions-item .hold { font: 400 10px var(--font-label); letter-spacing: .04em; color: var(--ink-6); }
+
+/* The linked work, one row per live link. Chips wrap onto their own line
+   rather than forcing the row wider than its container — the one thing this
+   block is required not to do at 390px. */
+.decisions-work-row { padding: 7px 0; border-bottom: 1px solid var(--line-2); cursor: pointer; }
+.decisions-work-row:last-child { border-bottom: none; }
+.decisions-work-row:hover { background: var(--wash); }
+.decisions-work-row .subject { flex: 1; min-width: 160px; font-size: 12px; color: var(--ink-3); overflow-wrap: anywhere; }
+
+.decisions-gate-btn {
+  display: block; width: 100%; text-align: left; padding: 6px 9px; margin-bottom: 5px;
+  border: 1px solid var(--line-2); border-radius: 4px; background: none; cursor: pointer;
+  font: 400 11.5px var(--font-prose); color: var(--ink-3);
+}
+.decisions-gate-btn:hover { background: var(--wash); }
+
+/* The write controls: settle/re-open/edit below the body, the link-work and
+   add-dependency rows below their lists. All three wrap rather than push the
+   column wider — the same 390px rule as the rest of this screen. */
+.decisions-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 20px; }
+.decisions-link-form, .decisions-depend-form {
+  display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 9px;
+}
+.decisions-link-form input[type="text"] { flex: 1 1 140px; min-width: 0; }
+.decisions-link-form input,
+.decisions-link-form select,
+.decisions-depend-form select {
+  background: rgba(255, 255, 255, .04); border: 1px solid var(--line-3); border-radius: 4px;
+  color: var(--ink); padding: 5px 8px; font: 400 11px var(--font-label); outline: none;
+  max-width: 100%; box-sizing: border-box;
+}
+.decisions-depend-form select { flex: 1 1 160px; min-width: 0; }
+
+/* The in-place editors (settle, edit), replacing #decision-body the way
+   wiki.js's textarea replaces #doc-body. */
+.decisions-field { margin-bottom: 10px; }
+.decisions-field input, .decisions-field textarea {
+  width: 100%; box-sizing: border-box; background: rgba(255, 255, 255, .04);
+  border: 1px solid var(--line-3); border-radius: 6px; color: var(--ink);
+  padding: 8px 10px; font: 400 12px/1.6 var(--font-label); outline: none; resize: vertical;
+}
+.decisions-field textarea { min-height: 80px; }
+
+/* dom.kpi() stacked rather than the four-column .kpis grid: a 244px rail
+   cannot hold four columns without becoming the overflow this screen is
+   told never to have. */
+.decisions-kpis {
+  display: flex; flex-direction: column;
+  border: 1px solid rgba(255, 255, 255, .09); border-radius: var(--radius);
+  overflow: hidden; background: var(--panel);
+}
+.decisions-kpis .kpi { border-right: none; border-bottom: 1px solid var(--line); padding: 11px 13px; }
+.decisions-kpis .kpi:last-child { border-bottom: none; }
+.decisions-kpis .kpi .big { font-size: 22px; margin: 4px 0 3px; }
+
+.decisions-chain { max-height: 340px; overflow-y: auto; overflow-x: hidden; }
+.decisions-chain-layer { margin-bottom: 12px; }
+.decisions-chain-layer .layer-head {
+  font: 500 9px var(--font-label); letter-spacing: .11em; color: var(--ink-6); margin-bottom: 5px;
+}
+.decisions-chain-row {
+  display: flex; align-items: baseline; gap: 6px; padding: 3px 0;
+  font-size: 11px; flex-wrap: wrap;
+}
+.decisions-chain-row .dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.decisions-chain-row .waits { color: var(--ink-6); font-size: 10px; }
+.decisions-chain-link {
+  border: none; background: none; padding: 0; cursor: pointer;
+  font: 400 11px var(--font-prose); color: var(--ink-3); text-align: left;
+}
+.decisions-chain-link:hover { color: var(--accent); }
+
 /* ---------------------------------------------------------------------- drawer */
 
 .scrim { position: fixed; inset: 0; background: rgba(4, 5, 6, .6); z-index: 40; }
@@ -729,6 +820,154 @@ tbody tr:last-child td { border-bottom: none; }
  *   560px  a table cannot be a table; the work list becomes a card list
  */
 
+/* ----------------------------------------------------------------------- map
+ *
+ * Three views on one project: the work breakdown as a tree, what comes before
+ * what, and which decisions gate which. Two rules are load-bearing in here.
+ *
+ * The readiness bar and the completion trio sit side by side at every level,
+ * and neither is ever given the full width on its own — a lone bar with a
+ * percentage on it reads as "this much is finished", which is the one thing
+ * readiness does not mean.
+ *
+ * The graphs are in the markup twice, as SVG and as a nested list, and this
+ * file picks between them at 860px. A node graph you have to drag around on a
+ * phone is not a picture, and the work table already becomes cards at 560px on
+ * the same reasoning.
+ */
+.map-tabs { display: flex; gap: 6px; margin: 14px 0 0; }
+.map-tab {
+  padding: 7px 14px; border-radius: var(--radius-s);
+  border: 1px solid var(--line); background: none;
+  font: 500 10px var(--font-label); letter-spacing: .12em; color: var(--ink-5);
+  cursor: pointer;
+}
+.map-tab:hover { color: var(--ink-3); background: rgba(255, 255, 255, .04); }
+.map-tab.on { color: var(--accent); border-color: var(--accent-dim); background: var(--accent-wash); }
+
+.map-blurb { color: var(--ink-4); font-size: 12px; line-height: 1.55; margin: 10px 0 14px; max-width: 78ch; }
+
+.warn {
+  margin: 10px 0 0; padding: 8px 11px; border-radius: var(--radius-s);
+  background: var(--accent-wash); color: var(--accent);
+  font-size: 11.5px; line-height: 1.5;
+}
+.blocked-note {
+  margin: 0; padding: 9px 12px; border-radius: var(--radius-s);
+  background: var(--blocked-wash); color: var(--blocked);
+  font-size: 11.5px; line-height: 1.55;
+}
+
+.map-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); gap: 20px; }
+.map-readiness .big { font: 600 30px/1 var(--font-label); color: var(--accent); margin: 9px 0 5px; }
+.map-readiness .meter { margin-top: 10px; }
+.map-readiness .sub, .map-completion .sub {
+  font: 500 9px var(--font-label); letter-spacing: .1em; color: var(--ink-5); line-height: 1.6;
+}
+.map-completion .trio { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 10px 0 6px; }
+.map-completion .count .n { font: 600 30px/1 var(--font-label); color: var(--ink); }
+.map-completion .count .l { font: 500 9px var(--font-label); letter-spacing: .1em; color: var(--ink-5); margin-top: 5px; }
+
+.pair-small { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.pair-small .meter { width: 64px; flex: none; }
+.pair-small .v { font: 500 9.5px var(--font-label); letter-spacing: .07em; color: var(--ink-4); white-space: nowrap; }
+.pair-small .sep { color: var(--ink-6); }
+/* Said in words, because a blank cell and a 0 look the same and mean opposite
+   things. This is the one figure on the map that is not in a denominator. */
+.pair-small .exc { font: 500 9px var(--font-label); letter-spacing: .1em; color: var(--ink-5); }
+
+.map-controls { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.map-controls .chip { cursor: pointer; }
+.map-controls .chip.on { color: var(--accent); border-color: var(--accent-dim); background: var(--accent-wash); }
+
+.map-group-head {
+  display: flex; align-items: center; gap: 11px; width: 100%;
+  padding: 11px 16px; border: none; border-bottom: 1px solid var(--line);
+  background: none; color: var(--ink-3); cursor: pointer; text-align: left;
+}
+.map-group-head:hover { background: var(--wash); }
+.map-group-head .caret { color: var(--ink-5); width: 10px; }
+.map-group-head .name { font: 500 10.5px var(--font-label); letter-spacing: .11em; color: var(--ink-2); }
+.map-group-head .n {
+  font: 500 9.5px var(--font-label); color: var(--ink-5);
+  padding: 2px 6px; border-radius: 2px; background: rgba(255, 255, 255, .06);
+}
+.map-group-head .pair-small { margin-left: auto; }
+
+.map-rows { padding: 4px 0; }
+.map-row { display: flex; align-items: center; gap: 8px; padding: 4px 12px 4px 0; min-width: 0; }
+.map-row:hover { background: var(--wash); }
+.map-row.orphan { border-left: 2px solid var(--blocked-dim); }
+.caret-btn, .caret-spacer { width: 18px; flex: none; }
+.caret-btn { border: none; background: none; color: var(--ink-5); cursor: pointer; padding: 2px; }
+.caret-btn:hover { color: var(--ink-2); }
+.map-row-main {
+  display: flex; align-items: center; gap: 9px; min-width: 0; flex: 1;
+  border: none; background: none; color: var(--ink-2); cursor: pointer;
+  text-align: left; padding: 3px 0; font: inherit;
+}
+.map-row-main .subject {
+  font-size: 12.5px; color: var(--ink-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1;
+}
+.map-row-main:hover .subject { color: var(--ink); }
+.map-row .pts, .map-row .due { font: 500 9.5px var(--font-label); color: var(--ink-5); white-space: nowrap; }
+.excluded {
+  font: 500 8.5px var(--font-label); letter-spacing: .11em; color: var(--ink-5);
+  border: 1px solid var(--line-3); border-radius: 2px; padding: 1px 5px; white-space: nowrap;
+}
+.branch-pair { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+.branch-pair .kids { font: 500 9px var(--font-label); letter-spacing: .1em; color: var(--ink-5); white-space: nowrap; }
+
+/* The picture. It scrolls inside its own box; the page never scrolls sideways. */
+.graph-svg { padding: 16px; overflow-x: auto; }
+.graph-svg svg { display: block; }
+.graph-svg .node { cursor: pointer; }
+.graph-svg .node:hover .node-box, .graph-svg .node:focus-visible .node-box { stroke: var(--line-3); fill: var(--panel-3); }
+.graph-svg .node:focus-visible { outline: none; }
+.graph-svg .node:focus-visible .node-box { stroke: var(--accent); }
+.graph-svg .node-key { font: 500 10px var(--font-label); letter-spacing: .04em; fill: var(--ink-3); }
+.graph-svg .node-label { font: 400 11px var(--font-label); fill: var(--ink-4); }
+.graph-svg .node-exc { font: 500 8px var(--font-label); letter-spacing: .1em; fill: var(--ink-5); }
+.graph-svg .node-badge { font: 500 8px var(--font-label); letter-spacing: .1em; fill: var(--blocked); }
+.graph-list { display: none; padding: 8px 16px 16px; }
+
+.glist-node { border-bottom: 1px solid var(--line-2); padding: 8px 0; }
+.glist-node:last-child { border-bottom: none; }
+.glist-head {
+  display: flex; align-items: center; gap: 9px; width: 100%;
+  border: none; background: none; color: var(--ink-2); cursor: pointer;
+  text-align: left; padding: 2px 0; font: inherit; min-width: 0;
+}
+.glist-head .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.glist-head .subject {
+  font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1;
+}
+.glist-head .state, .glist-head .pill {
+  font: 500 8.5px var(--font-label); letter-spacing: .11em; color: var(--ink-5);
+}
+.glist-edges { padding-left: 18px; }
+.glist-edge { display: flex; align-items: center; gap: 8px; padding: 3px 0; flex-wrap: wrap; }
+.glist-edge .rel, .glist-edge .lag { font: 500 9px var(--font-label); letter-spacing: .1em; color: var(--ink-5); }
+.glist-edge .arrow { color: var(--ink-6); }
+.glist-edge .k { font: 500 10px var(--font-label); color: var(--ink-3); }
+.glist-edge.loop .rel, .glist-edge .loopmark { color: var(--blocked); }
+.glist-edge .loopmark, .glist-edge .origin {
+  font: 500 8.5px var(--font-label); letter-spacing: .1em;
+}
+.glist-edge .origin { color: var(--ink-5); }
+
+.map-links .map-link-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 0; border-bottom: 1px solid var(--line-2); flex-wrap: wrap;
+}
+.map-links .map-link-row:last-child { border-bottom: none; }
+.map-link-row .rel { font: 500 9px var(--font-label); letter-spacing: .1em; color: var(--ink-5); }
+.map-link-row .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+/* A matcher's claim and a person's claim are never drawn the same. This is the
+   only mark on the map that says which one a link is. */
+.map-link-row .origin { font: 500 8.5px var(--font-label); letter-spacing: .1em; color: var(--ink-5); }
+
 @media (max-width: 1100px) {
   .grid.c2, .grid.c2-wide, .grid.c2-narrow, .grid.c3 { grid-template-columns: minmax(0, 1fr); }
   .kpis { grid-template-columns: repeat(2, 1fr); }
@@ -737,6 +976,8 @@ tbody tr:last-child td { border-bottom: none; }
   .phases { grid-template-columns: repeat(3, 1fr); }
   .wiki { grid-template-columns: 210px minmax(0, 1fr); }
   .wiki-rail.right { display: none; }
+  .decisions { grid-template-columns: 210px minmax(0, 1fr); }
+  .decisions-rail.right { display: none; }
   .gantt { grid-template-columns: 220px minmax(0, 1fr); }
 }
 
@@ -764,8 +1005,17 @@ tbody tr:last-child td { border-bottom: none; }
   .searchbox input { width: 100%; }
   .wiki { grid-template-columns: minmax(0, 1fr); }
   .wiki-rail { border-right: none; border-bottom: 1px solid var(--line); padding: 14px 10px; }
+  .decisions { grid-template-columns: minmax(0, 1fr); }
+  .decisions-rail { border-right: none; border-bottom: 1px solid var(--line); padding: 14px 10px; }
+  .decisions-body { padding: 18px 16px 70px; }
   .wiki-body { padding: 18px 16px 70px; }
   .drawer { width: 100vw; }
+  /* The graph goes and the list arrives. Same data, same colours; the arrow
+     becomes a word. Both are always in the markup, so a resize needs no
+     refetch and no re-render. */
+  .graph-svg { display: none; }
+  .graph-list { display: block; }
+  .map-pair { grid-template-columns: minmax(0, 1fr); gap: 18px; }
 }
 
 @media (max-width: 560px) {
@@ -801,6 +1051,12 @@ tbody tr:last-child td { border-bottom: none; }
   .cal-cell { min-height: 62px; padding: 5px; }
   .cal-cell .day { margin-bottom: 3px; }
   .cal-event { font-size: 9px; }
+  .map-completion .trio { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .map-completion .count { display: flex; align-items: baseline; gap: 10px; }
+  .map-completion .count .n { font-size: 20px; }
+  .map-completion .count .l { margin-top: 0; }
+  .map-tabs { flex-wrap: wrap; }
+  .branch-pair { margin-left: 0; width: 100%; padding-left: 26px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

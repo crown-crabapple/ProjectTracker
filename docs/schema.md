@@ -1,7 +1,7 @@
 # The schema
 
-85 tables in `db/schema.sql` plus five added by migration `0002` and one by
-`0003`, sectioned by
+85 tables in `db/schema.sql` plus five added by migration `0002`, one by `0003`
+and three by `0004`, sectioned by
 domain, with the derivation for every non-obvious column written next to it. This
 is the map, not a repeat of the DDL.
 
@@ -50,6 +50,11 @@ These are the ones worth knowing before changing anything.
 | `repositories.hook_secret_env` | The NAME of the variable holding the webhook's shared secret. No secret means **no open endpoint**: an unsigned delivery is never accepted, so this column is what opens the door rather than merely improving it. |
 | `repositories.hook_actor_id` | Whose authority a delivery borrows when a status rule fires. Nobody starts a webhook, so without this a delivery mirrors and moves nothing — and says so in its own record. `docs/decisions/0009`. |
 | `git_hook_deliveries` | Every delivery, refusals included, with the reason and the (truncated) body. `delivery_id` is deliberately **not** unique: a retry is a fact, and its row records that it was ignored rather than replacing the first. |
+| `decisions.document_id` | The wiki page a decision was moved out of, if any. Nothing about the page changes — not archived, not flagged — this column is the only record that it moved, and it is why the wiki index can exclude the page without deleting it. `docs/decisions/0010`. |
+| `decision_work_packages.relation` | `blocks`, `informs` or `arose_from`, kept apart so a decision that merely interests six people is never counted as one that stops six people. |
+| `decision_work_packages.origin` / `matched_in` | The same rule the git deck's links run on: `person`, `import` or `matcher`, because a key a matcher found in a custom field is a claim and a link a person made by hand is a decision, and the two are never drawn the same. |
+| `decision_work_packages.removed_at` + `removed_by` | A removed link keeps its row, and is only ever revived by a later `origin: 'person'` link — never by a matcher. |
+| `decision_dependencies` | An edge list (`decision_id` cannot settle until `depends_on_id` does) rather than a parent column, because a decision routinely waits on two. A new edge is refused where it would close a cycle, checked against every live edge in the database before the row is written — `src/domain/decisions.js`'s `wouldCycle`. |
 | `mcp_tokens.token_hash` + `token_hint` | sha256 and the last four characters. The secret is shown once at creation. |
 | `mcp_audit` | Every call, reads included. `docs/decisions/0005`. |
 | `mcp_tokens.created_by` | Who issued it, and — for a write-scoped token — whose permissions its writes run with. A token can do no more than its issuer, and one with nobody here may read and may not write. `docs/decisions/0006`. |
@@ -75,6 +80,7 @@ These are the ones worth knowing before changing anything.
 | repositories | `repositories`, `repository_revisions`, `revision_work_packages`, `integrations` |
 | the git deck (`0002`) | `git_items`, `work_package_git_links`, `git_type_rules`, `git_unmatched_keys`, `git_pulls` |
 | webhooks (`0003`) | `git_hook_deliveries` |
+| decisions (`0004`) | `decisions`, `decision_work_packages`, `decision_dependencies` |
 | workflow & customisation | `custom_fields`, `custom_field_projects`, `custom_field_types`, `custom_values`, `form_configurations`, `form_sections`, `form_fields`, `attribute_help_texts`, `automations`, `automation_projects`, `automation_runs`, `project_initiation_requests`, `settings` |
 | MCP | `mcp_tools`, `mcp_tokens`, `mcp_audit`, `generated_summaries`, `exports` |
 | migrations | `schema_migrations` (created by `db/migrate.js`, not by `schema.sql`) |

@@ -37,6 +37,25 @@ node -e "require('./src/api/mutations2').issueMcpToken({user:{id:1,is_admin:true
 The secret is shown once. Only its sha256 and its last four characters are
 stored, so it is not recoverable from the database.
 
+### The `env` block is optional, and better left out
+
+`src/config.js` loads the project's `.env` before the first query, so putting
+`PT_MCP_TOKEN` and the database settings there instead leaves the client entry as
+a command and a path — and leaves the token in the one gitignored file rather
+than in a second one. On Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ops\register-mcp.ps1 show          # print the entry, check .env has a token
+powershell -ExecutionPolicy Bypass -File ops\register-mcp.ps1 desktop-add   # write it into Claude Desktop's config
+```
+
+### It is not a service, and cannot be one
+
+There is no port, so there is nothing for a background copy to listen on. Started
+without a client attached it reads EOF on stdin and exits. "Run it as a service"
+for a stdio server means registering it with the client, which starts it on
+demand and kills it on close. `ops/README.md` has the long version.
+
 ## Without a token
 
 The server starts, answers `initialize`, and refuses every tool call with a

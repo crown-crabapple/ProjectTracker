@@ -18,6 +18,7 @@
  *   pt baseline VW --name "..."
  *   pt sprint close S-14
  *   pt alerts run
+ *   pt decisions [--project VW]     the open decisions, what they block, and what they wait on
  *   pt deck [--project VW]           the repositories, and how much work is mapped
  *   pt pull [NAME] [--dry-run]      fetch a repository and re-match its keys
  *   pt links WP-112 | F-LOAD-012    what one work package is in the repository
@@ -45,6 +46,7 @@ const mut = require('../api/mutations');
 const mut2 = require('../api/mutations2');
 const mut3 = require('../api/mutations3');
 const views5 = require('../api/views5');
+const views6 = require('../api/views6');
 const gitPull = require('../gitdeck/pull');
 const exporters = require('../api/exports');
 const views = require('../api/views');
@@ -556,6 +558,53 @@ const COMMANDS = {
         : '');
   },
 
+  /**
+   * The open decisions, what each is holding up, and what it is waiting on.
+   *
+   * Rust is legitimate here and nowhere else in this command: an open
+   * decision that blocks work is exactly the "needs a decision" case the
+   * colour is reserved for.
+   */
+  async decisions(ctx) {
+    const project = await projectByCode(ctx, flag('project'));
+    const data = await views6.decisions(ctx, { projectId: project ? Number(project.id) : null });
+    const open = data.decisions.filter((d) => d.state === 'open');
+    const out = [heading('Decisions')];
+
+    if (!open.length) {
+      out.push('', '  nothing open');
+    } else {
+      const idClause = db.inClause(open.map((d) => d.id));
+      const blockedRows = await db.query(`
+        SELECT dwp.decision_id, wp.wp_key FROM decision_work_packages dwp
+          JOIN work_packages wp ON wp.id = dwp.work_package_id
+         WHERE dwp.relation = 'blocks' AND dwp.removed_at IS NULL AND dwp.decision_id IN ${idClause.sql}`,
+      idClause.params);
+      const blockedByDecision = new Map();
+      for (const r of blockedRows) {
+        const list = blockedByDecision.get(Number(r.decision_id)) || [];
+        list.push(r.wp_key);
+        blockedByDecision.set(Number(r.decision_id), list);
+      }
+
+      out.push('', table(['ref', 'title', 'blocks', 'waits on'], open.map((d) => {
+        const blocked = blockedByDecision.get(d.id) || [];
+        return [
+          d.blocksCount ? W.red(d.ref) : d.ref,
+          d.title.slice(0, 48),
+          d.blocksCount ? W.red(`${d.blocksCount} (${blocked.join(', ')})`) : W.dim('nothing'),
+          d.waitingOn.length ? d.waitingOn.join(', ') : W.dim('nothing'),
+        ];
+      })));
+    }
+
+    out.push('', `  ${W.bold(String(data.kpis.settled))} settled`
+      + (data.kpis.superseded ? ` · ${data.kpis.superseded} superseded` : ''));
+    out.push(W.dim('\n  A decision is not progress - it is what is waiting on an answer, not how much'));
+    out.push(W.dim('  of the project is finished.'));
+    return out.join('\n');
+  },
+
   async activity(ctx) {
     const rows = await require('../api/views2').recentActivity(ctx, { limit: Number(flag('limit')) || 25 });
     return [
@@ -807,6 +856,7 @@ const COMMANDS = {
       ['baseline VW', '--name "..." - a copy of every date, never recomputed'],
       ['sprint [close S-14]', 'list sprints, or close one'],
       ['alerts [run]', 'the date alert rules, or evaluate them now'],
+      ['decisions [--project VW]', 'the open decisions, what they block, and what they wait on'],
       ['deck [--project VW]', 'the repositories, health, CI and how much work is mapped'],
       ['pull [NAME]', '--dry-run fetches and matches without writing'],
       ['links WP-112', 'what it is in the repository - a repository key works too'],

@@ -32,9 +32,12 @@ const views2 = require('../api/views2');
 const views3 = require('../api/views3');
 const views4 = require('../api/views4');
 const views5 = require('../api/views5');
+const views6 = require('../api/views6');
+const views7 = require('../api/views7');
 const mut = require('../api/mutations');
 const mut2 = require('../api/mutations2');
 const mut3 = require('../api/mutations3');
+const mut4 = require('../api/mutations4');
 const pull = require('../gitdeck/pull');
 const hooks = require('../gitdeck/hooks');
 const exporters = require('../api/exports');
@@ -207,6 +210,23 @@ router.get('/api/wiki', async ({ req, url }) => {
   return views4.wiki(ctx, { projectId, slug: url.searchParams.get('doc') });
 });
 
+router.get('/api/decisions', async ({ req, url }) => {
+  const ctx = await contextFor(req);
+  const projectId = url.searchParams.get('project')
+    ? await scopeProject(ctx, url.searchParams.get('project')) : null;
+  return views6.decisions(ctx, { projectId, ref: url.searchParams.get('decision') });
+});
+
+router.get('/api/map', async ({ req, url }) => {
+  const ctx = await contextFor(req);
+  // The map is drawn for one project, so the project is required rather than
+  // defaulted: a portfolio-wide map is a different picture and `#/portfolio`
+  // and `#/roadmap` already draw it.
+  const projectId = url.searchParams.get('project')
+    ? await scopeProject(ctx, url.searchParams.get('project')) : null;
+  return views7.map(ctx, { projectId, group: url.searchParams.get('group') || 'none' });
+});
+
 router.get('/api/meetings', async ({ req, url }) => {
   const ctx = await contextFor(req);
   const projectId = url.searchParams.get('project')
@@ -376,6 +396,42 @@ router.post('/api/wp/:id/git-links', async ({ req, params }) => {
 router.delete('/api/git-links/:id', async ({ req, params }) => {
   const ctx = await contextFor(req);
   return mut3.unlinkWorkPackage(ctx, Number(params.id));
+});
+
+// ------------------------------------------------------------------ decisions
+
+router.post('/api/decisions', async ({ req }) => {
+  const ctx = await contextFor(req);
+  const { fields } = await body.read(req);
+  return mut4.createDecision(ctx, fields);
+});
+
+router.patch('/api/decisions/:id', async ({ req, params }) => {
+  const ctx = await contextFor(req);
+  const { fields } = await body.read(req);
+  return mut4.updateDecision(ctx, Number(params.id), fields);
+});
+
+router.post('/api/decisions/:id/work', async ({ req, params }) => {
+  const ctx = await contextFor(req);
+  const { fields } = await body.read(req);
+  return mut4.linkWork(ctx, Number(params.id), fields);
+});
+
+router.delete('/api/decisions/:id/work/:wpId', async ({ req, params }) => {
+  const ctx = await contextFor(req);
+  return mut4.unlinkWork(ctx, Number(params.id), Number(params.wpId));
+});
+
+router.post('/api/decisions/:id/depends', async ({ req, params }) => {
+  const ctx = await contextFor(req);
+  const { fields } = await body.read(req);
+  return mut4.addDependency(ctx, Number(params.id), fields);
+});
+
+router.delete('/api/decisions/:id/depends/:otherId', async ({ req, params }) => {
+  const ctx = await contextFor(req);
+  return mut4.removeDependency(ctx, Number(params.id), Number(params.otherId));
 });
 
 router.post('/api/projects', async ({ req }) => {

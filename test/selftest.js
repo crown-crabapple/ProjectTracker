@@ -393,6 +393,66 @@ async function pureChecks() {
   eq('an unquoted boundary is read', boundaryOf('multipart/form-data; boundary=abc'), 'abc');
   eq('a missing boundary is null', boundaryOf('application/json'), null);
 
+  // --- the graph maths behind the map
+  //
+  // `graph.rank` is the one longest-path walk in the product: `decisions.layer`
+  // delegates to it and the relations graph on the map calls it directly. Two
+  // copies would be two answers to how deep a node sits.
+  const graph = require('../src/domain/graph');
+  const chain = graph.rank([1, 2, 3], [{ from: 2, to: 1 }, { from: 3, to: 2 }]);
+  eq('a chain ranks in order', [chain.get(1), chain.get(2), chain.get(3)], [0, 1, 2]);
+  const diamond = graph.rank([1, 2, 3, 4],
+    [{ from: 2, to: 1 }, { from: 3, to: 1 }, { from: 4, to: 2 }, { from: 4, to: 3 }]);
+  eq('a node ranks behind its DEEPEST dependency, not its first', diamond.get(4), 2);
+
+  // The relations table permits a loop; `decision_dependencies` refuses one.
+  // So this guard is load-bearing for one caller and a belt for the other, and
+  // the thing that must not happen is a hang.
+  const looped = graph.rank([1, 2, 3], [{ from: 1, to: 2 }, { from: 2, to: 3 }, { from: 3, to: 1 }]);
+  check('a cycle ranks rather than recursing forever', looped.size === 3, JSON.stringify([...looped]));
+  const found = graph.cycles([1, 2, 3], [{ from: 1, to: 2 }, { from: 2, to: 3 }, { from: 3, to: 1 }]);
+  eq('and the edge that closes the loop is named, so somebody knows which link to cut',
+    found.length, 1);
+  eq('a graph with no loop reports none',
+    graph.cycles([1, 2, 3], [{ from: 2, to: 1 }, { from: 3, to: 2 }]).length, 0);
+  // A picture that redraws differently for the same data is one nobody trusts.
+  eq('columns are ordered by the caller\'s key, not by insertion',
+    graph.columns([3, 1, 2], graph.rank([1, 2, 3], []), (id) => ({ 1: 'c', 2: 'a', 3: 'b' })[id]),
+    [[2, 3, 1]]);
+
+  // A rank is a position in a picture, and this is what keeps it one: the
+  // module reaches nothing. It cannot see a status weight, so it cannot
+  // produce a figure that could be mistaken for progress.
+  const graphSource = fs.readFileSync(path.join(ROOT, 'src/domain/graph.js'), 'utf8');
+  check('graph.js depends on nothing', !/\brequire\(/.test(graphSource));
+  check('and reads no field that carries progress',
+    !/\b(progress_weight|status_code|story_points)\b/.test(
+      graphSource.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')));
+
+  // --- the map draws no number of its own
+  //
+  // The whole argument of `docs/decisions/0011`. If this file ever computes one
+  // it becomes a second progress model, and the two disagree in front of
+  // somebody deciding which to believe.
+  const views7Source = fs.readFileSync(path.join(ROOT, 'src/api/views7.js'), 'utf8');
+  check('views7 computes no percentage of its own',
+    !/Math\.round\([^)]*\*\s*100/.test(views7Source) && !/\/\s*\w+\s*\)\s*\*\s*100/.test(views7Source),
+    'the map must take every figure from rollup.js');
+  check('and it is a read path — no mutation module is reachable from it',
+    !/require\('\.\.?\/.*mutations/.test(views7Source));
+
+  const views7 = require('../src/api/views7');
+  check('a relation kind that carries no order has no precedence entry',
+    !views7.PRECEDENCE.relates && !views7.PRECEDENCE.duplicates && !views7.PRECEDENCE.includes,
+    'includes is containment; treating it as order would rank a parent behind its own children');
+  // The table stores one direction per kind and derives the inverse on read, so
+  // `blocks` runs the other way round from `follows`. Reading it wrong draws
+  // every arrow backwards.
+  eq('follows means the from side happens after',
+    views7.PRECEDENCE.follows({ from_id: 7, to_id: 4 }), { from: 7, to: 4 });
+  eq('blocks means the to side happens after',
+    views7.PRECEDENCE.blocks({ from_id: 7, to_id: 4 }), { from: 4, to: 7 });
+
   // --- the identifier guard
   const db = require('../src/db');
   eq('a plain identifier passes', db.ident('work_packages'), 'work_packages');
@@ -679,6 +739,212 @@ async function databaseChecks(db) {
   check('and the refusal carries the other version so both can be shown',
     conflictPayload && conflictPayload.currentBody !== undefined);
 
+  // --- decisions
+  //
+  // A decision used to be a wiki page; it is a record now, with two link
+  // tables that say what waits on it and what it waits on. The graph maths
+  // comes from `src/domain/decisions.js` once, the same rule `rollup.js`
+  // enforces for a percentage.
+  const mut4 = require('../src/api/mutations4');
+  const decisionsDomain = require('../src/domain/decisions');
+  const rollup = require('../src/domain/rollup');
+
+  const d19 = await db.one("SELECT id, ref, state FROM decisions WHERE project_id = ? AND ref = 'D-19'", [vw]);
+  const d22 = await db.one("SELECT id, ref, state FROM decisions WHERE project_id = ? AND ref = 'D-22'", [vw]);
+  const d08 = await db.one("SELECT id, ref, state FROM decisions WHERE project_id = ? AND ref = 'D-08'", [vw]);
+  const d14 = await db.one("SELECT id, ref, state FROM decisions WHERE project_id = ? AND ref = 'D-14'", [vw]);
+  const d25 = await db.one("SELECT id, ref, state FROM decisions WHERE project_id = ? AND ref = 'D-25'", [vw]);
+
+  await throws('a decision that waits on an open decision cannot be settled',
+    () => mut4.updateDecision(ctx, d19.id, { state: 'settled' }), 'D-22');
+  await mut4.updateDecision(ctx, d22.id, { state: 'settled' });
+  const settledD19 = await mut4.updateDecision(ctx, d19.id, { state: 'settled' });
+  eq('and settling the one it waits on first lets it through', settledD19.state, 'settled');
+
+  await mut4.addDependency(ctx, d25.id, { depends_on_id: d08.id });
+  await throws('two decisions cannot be made to gate each other',
+    () => mut4.addDependency(ctx, d08.id, { depends_on_id: d25.id }), 'D-25 waits on D-08');
+  await throws('a decision cannot depend on itself',
+    () => mut4.addDependency(ctx, d25.id, { depends_on_id: d25.id }), 'cannot depend on itself');
+
+  // D-14 blocks WP-112 is a seeded link.
+  const dwpCountBefore = Number(await db.scalar(
+    'SELECT COUNT(*) FROM decision_work_packages WHERE decision_id = ? AND work_package_id = 112', [d14.id]));
+  await mut4.unlinkWork(ctx, d14.id, 112);
+  const dwpAfterUnlink = await db.one(
+    'SELECT removed_at FROM decision_work_packages WHERE decision_id = ? AND work_package_id = 112', [d14.id]);
+  eq('a link a person removed keeps its row', Number(await db.scalar(
+    'SELECT COUNT(*) FROM decision_work_packages WHERE decision_id = ? AND work_package_id = 112', [d14.id]
+  )), dwpCountBefore);
+  check('and says the link was removed', dwpAfterUnlink.removed_at !== null);
+
+  // D-19 depends on D-22 is a seeded dependency.
+  const ddCountBefore = Number(await db.scalar(
+    'SELECT COUNT(*) FROM decision_dependencies WHERE decision_id = ? AND depends_on_id = ?', [d19.id, d22.id]));
+  await mut4.removeDependency(ctx, d19.id, d22.id);
+  const ddAfterRemove = await db.one(
+    'SELECT removed_at FROM decision_dependencies WHERE decision_id = ? AND depends_on_id = ?', [d19.id, d22.id]);
+  eq('the same for a dependency somebody removed', Number(await db.scalar(
+    'SELECT COUNT(*) FROM decision_dependencies WHERE decision_id = ? AND depends_on_id = ?', [d19.id, d22.id]
+  )), ddCountBefore);
+  check('and its removed_at is set too', ddAfterRemove.removed_at !== null);
+
+  await throws('a matcher never revives a link a person removed',
+    () => mut4.linkWork(ctx, d14.id, { work_package_id: 112, relation: 'blocks', origin: 'matcher' }),
+    'unlinked');
+  const dwpStillRemoved = await db.scalar(
+    'SELECT removed_at FROM decision_work_packages WHERE decision_id = ? AND work_package_id = 112', [d14.id]);
+  check('and removed_at is not cleared by the attempt', dwpStillRemoved !== null);
+
+  // The document a decision points at drops out of the wiki index; a document
+  // nothing points at does not.
+  const decisionSourceDoc = await mut2.createDocument(ctx, {
+    project_id: vw, title: 'Selftest decision source', body: 'source text',
+  });
+  await mut4.createDecision(ctx, {
+    project_id: vw, ref: 'D-90', title: 'A selftest decision', document_id: decisionSourceDoc.id,
+  });
+  const wikiAfter = await views4.wiki(ctx, { projectId: vw });
+  check('a decision page has left the wiki',
+    !wikiAfter.docs.some((d) => d.id === decisionSourceDoc.id)
+    && wikiAfter.docs.some((d) => d.slug === 'build-plan'),
+    JSON.stringify(wikiAfter.docs.map((d) => d.slug)));
+
+  // An open decision, or a link to one, must not move the number `rollup.js`
+  // computes — the same discipline the git deck's health score is held to.
+  const readinessBefore = rollup.readiness(await query.select({ filters: { project: vw } }));
+  await mut4.createDecision(ctx, { project_id: vw, ref: 'D-91', title: 'Another selftest decision' });
+  await mut4.linkWork(ctx, d25.id, { work_package_id: 112, relation: 'blocks' });
+  const readinessAfter = rollup.readiness(await query.select({ filters: { project: vw } }));
+  eq('an open decision is not progress', readinessAfter, readinessBefore);
+
+  const chainLayers = decisionsDomain.layer(
+    [{ id: 1 }, { id: 2 }, { id: 3 }],
+    [{ decision_id: 2, depends_on_id: 1 }, { decision_id: 3, depends_on_id: 2 }]
+  );
+  check('the gating chain is ordered',
+    chainLayers.get(1) < chainLayers.get(2) && chainLayers.get(2) < chainLayers.get(3),
+    JSON.stringify([...chainLayers]));
+
+  await mut4.createDecision(ctx, { project_id: vw, ref: 'D-92', title: 'Trail check decision' });
+  const decisionTrail = await db.one(`
+    SELECT id FROM activities WHERE project_id = ? AND kind = 'decision' AND target_label = 'D-92'
+     ORDER BY id DESC LIMIT 1`, [vw]);
+  check('writing a decision is recorded in the trail', Boolean(decisionTrail));
+
+  await throws('somebody without record_decisions cannot settle a decision',
+    () => mut4.updateDecision(readerCtx, d25.id, { state: 'settled' }), 'record_decisions');
+
+  // --- the map
+  //
+  // One project, three pictures. Every figure on it comes from `rollup.js` and
+  // every rank from `src/domain/graph.js`; these checks are that the payload
+  // says so honestly, not that the arithmetic is right — the arithmetic is
+  // checked where it lives.
+  const views7Api = require('../src/api/views7');
+  const mapData = await views7Api.map(ctx, { projectId: vw });
+
+  const mapWps = await query.select({ filters: { project: vw }, limit: 1000 });
+  eq('the map reports the same readiness as rollup does for the same list',
+    mapData.totals.readiness, rollup.readiness(mapWps));
+  eq('and the same completion, beside it rather than folded into it',
+    mapData.totals.completion, rollup.completion(mapWps));
+  check('readiness and completion are separate keys, never one figure',
+    mapData.totals.readiness.pct !== undefined && mapData.totals.completion.done !== undefined
+      && mapData.totals.readiness.pct !== mapData.totals.completion.done + mapData.totals.completion.partial,
+    JSON.stringify(mapData.totals));
+
+  // Excluded is not zero, and the client can only say so if the NULL survives.
+  check('an excluded status keeps its NULL weight all the way to the payload',
+    mapData.statuses.some((st) => st.progress_weight === null),
+    JSON.stringify(mapData.statuses.map((st) => [st.code, st.progress_weight])));
+  // The deferred work in the demo portfolio is in CDX, not VW, so this is
+  // checked where the data is rather than asserted where it is not.
+  const cdxId = await db.scalar("SELECT id FROM projects WHERE code = 'CDX'");
+  const cdxMap = await views7Api.map(ctx, { projectId: cdxId });
+  const excludedRow = cdxMap.tree.groups.flatMap((g) => g.rows).find((r) => r.progress_weight === null);
+  check('and so does a work package sitting on one', Boolean(excludedRow),
+    'without it the screen draws a blank cell where it should say EXCLUDED');
+  check('excluded work leaves the denominator rather than being scored zero',
+    cdxMap.totals.readiness.excluded > 0
+      && cdxMap.totals.readiness.scored === cdxMap.totals.completion.total - cdxMap.totals.readiness.excluded,
+    JSON.stringify(cdxMap.totals.readiness));
+
+  await throws('the map refuses a grouping it does not know',
+    () => views7Api.map(ctx, { projectId: vw, group: 'colour' }), 'unknown grouping');
+  await throws('and refuses to be drawn for no project at all',
+    () => views7Api.map(ctx, { projectId: null }), 'one project');
+
+  const ungrouped = mapData.tree.groups;
+  eq('ungrouped, the tree is one group holding the whole hierarchy', ungrouped.length, 1);
+  check('and every work package is in it', ungrouped[0].rows.length === mapWps.length,
+    `${ungrouped[0].rows.length} of ${mapWps.length}`);
+  check('a child is drawn deeper than its parent',
+    ungrouped[0].rows.some((r) => r.depth > 0));
+  const withKids = ungrouped[0].rows.find((r) => r.childCount > 0);
+  check('a branch carries the pair for everything inside it', Boolean(withKids && withKids.subtree),
+    'a collapsed branch that says nothing about its contents is a branch nobody opens');
+
+  const grouped = await views7Api.map(ctx, { projectId: vw, group: 'version' });
+  check('grouping by version splits the tree', grouped.tree.groups.length > 1,
+    `${grouped.tree.groups.length} groups`);
+  eq('and every work package is still in exactly one group',
+    grouped.tree.groups.reduce((a, g) => a + g.rows.length, 0), mapWps.length);
+  check('each group carries its own pair, not a share of the project figure',
+    grouped.tree.groups.every((g) => g.readiness && g.completion));
+  // Sorting the unset bucket in alphabetically would bury it mid-list.
+  const unsetAt = grouped.tree.groups.findIndex((g) => g.key === null);
+  check('the unset bucket is last, or absent',
+    unsetAt === -1 || unsetAt === grouped.tree.groups.length - 1, String(unsetAt));
+
+  check('the relations graph draws only work that carries a relation',
+    mapData.relations.nodes.every((n) => mapData.relations.edges
+      .some((e) => e.from_id === n.id || e.to_id === n.id)),
+    'a hundred unconnected dots say nothing the tree does not say better');
+  check('and every relation it draws has both ends on the map',
+    mapData.relations.edges.every((e) => mapData.relations.nodes.some((n) => n.id === e.from_id)
+      && mapData.relations.nodes.some((n) => n.id === e.to_id)));
+  check('an unordered relation kind gets no arrow direction',
+    mapData.relations.edges.filter((e) => !views7Api.PRECEDENCE[e.kind])
+      .every((e) => e.after === null && e.before === null));
+
+  // The drawing limit is a refusal that says why, not a silent truncation.
+  eq('the drawing limit is reported whether or not it was hit',
+    typeof mapData.relations.limit, 'number');
+  check('a graph under the limit is drawn', mapData.relations.drawn === true,
+    `${mapData.relations.nodeCount} nodes, limit ${mapData.relations.limit}`);
+
+  check('the decision graph ranks a gated decision behind its gate',
+    mapData.decisions.nodes.every((n) => mapData.decisions.edges
+      .filter((e) => e.from === n.id)
+      .every((e) => {
+        const gate = mapData.decisions.nodes.find((o) => o.id === e.to);
+        return !gate || gate.rank < n.rank;
+      })));
+  check('a link to a decision records where it came from',
+    mapData.decisions.links.every((l) => ['person', 'import', 'matcher'].includes(l.origin)),
+    'a regex claim drawn the same as a person claim is the thing the git deck rules prevent');
+  check('and a decision blocking nothing is not counted as blocking something',
+    mapData.decisions.nodes.every((n) => n.blocksCount >= 0)
+      && mapData.decisions.nodes.every((n) => n.state === 'open' || n.blocksCount === 0));
+
+  // A link somebody removed keeps its row and is never revived. The map is a
+  // read path, so the only way it could revive one is by forgetting the
+  // removed_at filter — which is exactly the mistake this makes visible.
+  const drawnLink = mapData.decisions.links[0];
+  check('the map draws a live decision link at all', Boolean(drawnLink));
+  if (drawnLink) {
+    await mut4.unlinkWork(ctx, drawnLink.decision_id, drawnLink.work_package_id);
+    const afterRemoval = await views7Api.map(ctx, { projectId: vw });
+    check('a link somebody removed is not drawn on the map',
+      !afterRemoval.decisions.links.some((l) => l.decision_id === drawnLink.decision_id
+        && l.work_package_id === drawnLink.work_package_id));
+    check('and the row is kept rather than deleted',
+      Number(await db.scalar(`SELECT COUNT(*) FROM decision_work_packages
+         WHERE decision_id = ? AND work_package_id = ? AND removed_at IS NOT NULL`,
+      [drawnLink.decision_id, drawnLink.work_package_id])) === 1);
+  }
+
   // --- meetings
   const meeting = await db.one("SELECT id FROM meetings WHERE state = 'minutes' LIMIT 1");
   await throws('a frozen agenda refuses a new item',
@@ -811,10 +1077,12 @@ async function databaseChecks(db) {
   eq('and a question naming a feature the file does not carry is reported, not dropped silently',
     imported1.report.questions.orphans, ['Q-F-ZZ-999-def']);
 
-  const decisionPage = await db.one(
-    "SELECT number, title, status FROM documents WHERE project_id = ? AND slug = 'd2'", [zz]
+  const decisionRow = await db.one(
+    "SELECT ref, title, state FROM decisions WHERE project_id = ? AND ref = 'D2'", [zz]
   );
-  eq('a decision becomes a wiki page carrying its state', decisionPage.status, 'OPEN');
+  eq('a decision becomes a decisions row carrying its state', decisionRow.state, 'open');
+  eq('and creates no document for it',
+    Number(await db.scalar("SELECT COUNT(*) FROM documents WHERE project_id = ? AND slug = 'd2'", [zz])), 0);
   const zzProject = await db.one('SELECT health, health_note FROM projects WHERE id = ?', [zz]);
   check('and an unsettled decision makes the project rust, which is what rust is for',
     zzProject.health === 'rust' && /D2/.test(zzProject.health_note), JSON.stringify(zzProject));
@@ -849,6 +1117,10 @@ async function databaseChecks(db) {
   eq('a second import of the same file changes nothing', again.report.features.created, 0);
   eq('and adds no duplicate activity', again.report.activity.created, 0);
   eq('and no duplicate comment', again.report.questions.created, 0);
+  eq('a re-import updates the same decision rather than making a second one',
+    again.report.decisions.created, 0);
+  eq('and the ref still resolves to exactly one row',
+    Number(await db.scalar("SELECT COUNT(*) FROM decisions WHERE project_id = ? AND ref = 'D2'", [zz])), 1);
 
   fixture.features['F-AA-002'].status = 'done';
   delete fixture.features['F-BB-001'];
@@ -1337,7 +1609,7 @@ async function databaseChecks(db) {
 
   const madeProject = JSON.parse(text(2));
   eq('project.create applies the template blueprint', madeProject.created,
-    { phases: 6, versions: 3, wiki_pages: 4, work_packages: 1 });
+    { phases: 6, versions: 3, wiki_pages: 3, work_packages: 1 });
   const slf = await db.scalar("SELECT id FROM projects WHERE code = 'SLF'");
   const slfOwner = await db.scalar(`
     SELECT u.login FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.project_id = ?`, [slf]);
@@ -1590,11 +1862,34 @@ async function httpChecks({ livingToken }) {
       ['deck', '/api/deck'],
       ['deck for one project', '/api/deck?project=1'],
       ['a work package in the repository', '/api/wp/112/git'],
+      // `#/decisions` and `#/map` both had their view functions covered and
+      // their routes exercised by hand. A route nobody calls in the suite is
+      // how a screen returns a 500 for the whole chart, which is what the
+      // Gantt did once.
+      ['decisions', '/api/decisions?project=1'],
+      ['the map', '/api/map?project=1'],
+      ['the map grouped by version', '/api/map?project=1&group=version'],
+      ['the map grouped by assignee', '/api/map?project=1&group=assignee'],
       ['admin', '/api/admin?tab=workflow'],
       ['drawer', '/api/wp/112'],
     ]) {
       const res = await request('GET', urlPath, { cookie });
       check(`GET ${name} is 200`, res.status === 200, `${res.status} ${JSON.stringify(res.json).slice(0, 200)}`);
+    }
+
+    // A grouping that silently fell back to another would draw a picture of
+    // something other than what was asked for.
+    const badGroup = await request('GET', '/api/map?project=1&group=colour', { cookie });
+    eq('an unknown grouping is refused rather than ignored', badGroup.status, 400);
+    check('and the refusal names the thing', /unknown grouping/.test(String(badGroup.json && badGroup.json.error)),
+      JSON.stringify(badGroup.json));
+    const noProject = await request('GET', '/api/map', { cookie });
+    eq('the map without a project is refused, not defaulted', noProject.status, 400);
+
+    // The map is a read path. `docs/decisions/0011`.
+    for (const method of ['POST', 'PATCH', 'DELETE']) {
+      const res = await request(method, '/api/map?project=1', { cookie, body: {} });
+      check(`${method} /api/map is not a route`, res.status === 404 || res.status === 405, String(res.status));
     }
 
     const wrongMethod = await request('DELETE', '/api/bootstrap', { cookie });

@@ -61,6 +61,54 @@
     return el;
   }
 
+  /**
+   * The same builder, in the SVG namespace: svgEl('line', { x1: 0, ... }).
+   *
+   * Two views draw graphs — what blocks what, and which decisions gate which —
+   * and a diagonal line is the one thing a positioned div cannot be. This
+   * exists so those two do not reach for innerHTML to get one.
+   *
+   * It keeps h()'s discipline exactly: text through textContent, everything
+   * else through setAttribute. There is no HTML-string path here either, so a
+   * work package subject in an SVG label is text for the same reason it is
+   * text everywhere else. The differences from h() are the two the namespace
+   * forces — createElementNS, and classList through setAttribute because an
+   * SVG element's className is not a string.
+   */
+  function svgEl(spec, props, children) {
+    const parts = String(spec).split('.');
+    const el = document.createElementNS('http://www.w3.org/2000/svg', parts[0] || 'g');
+    const classes = parts.slice(1).filter(Boolean);
+
+    if (props && (Array.isArray(props) || typeof props === 'string' || props instanceof Node)) {
+      children = props;
+      props = null;
+    }
+
+    if (props) {
+      for (const [key, value] of Object.entries(props)) {
+        if (value === null || value === undefined || value === false) continue;
+        if (key === 'class') { classes.push(...String(value).split(/\s+/).filter(Boolean)); continue; }
+        if (key === 'text') { el.textContent = value === true ? '' : String(value); continue; }
+        if (key.startsWith('on') && typeof value === 'function') {
+          el.addEventListener(key.slice(2), value);
+          continue;
+        }
+        if (key === 'style' && typeof value === 'object') {
+          for (const [k, v] of Object.entries(value)) {
+            if (v !== null && v !== undefined && v !== false) el.style.setProperty(k, String(v));
+          }
+          continue;
+        }
+        el.setAttribute(key, value === true ? '' : String(value));
+      }
+    }
+    if (classes.length) el.setAttribute('class', classes.join(' '));
+
+    append(el, children);
+    return el;
+  }
+
   function append(el, children) {
     if (children === null || children === undefined || children === false) return;
     if (Array.isArray(children)) {
@@ -135,5 +183,5 @@
     });
   }
 
-  global.dom = { h, fill, append, $, pct, nf, shortDate, kpi, meter, tag, key, avatar, MONTHS };
+  global.dom = { h, svgEl, fill, append, $, pct, nf, shortDate, kpi, meter, tag, key, avatar, MONTHS };
 }(window));

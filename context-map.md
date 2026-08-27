@@ -22,12 +22,14 @@ model.
 ### Data
 - `db/schema.sql` — 85 tables, sectioned by domain, with the derivation for
   every non-obvious column. The base; applied only to an empty schema.
-- `db/migrations/NNNN_*.sql` — changes after that. Two today: `0001` adds the
+- `db/migrations/NNNN_*.sql` — changes after that. Four today: `0001` adds the
   `mcp_tools` rows for the write tools, so a database seeded before them still
   offers them; `0002` adds the git deck — the mirror, the links, the per-type
   mapping and `work_packages.ref_key`, the key a repository knows a work package
   by; `0003` adds the webhook receiver's deliveries and the two columns that open
-  an endpoint and give it somebody to act as.
+  an endpoint and give it somebody to act as; `0004` adds `decisions`,
+  `decision_work_packages` and `decision_dependencies`, and moves a database's
+  existing one-page-per-decision wiki documents into `decisions` rows.
 - `db/migrate.js` — creates the database, applies the base then the migrations,
   records what ran in `schema_migrations`, and leaves **one account that can sign
   in** so the demo portfolio is optional. It only ever adds that account when
@@ -39,9 +41,10 @@ model.
 - `db/demo-data.js` — the design canvas's dataset, as data.
 - `db/seed.js` — loads both. Refuses to seed a portfolio twice.
 - `db/import-state.js` — merges a SeedFall tracker state file into a project:
-  features to work packages, decisions to wiki pages, questions to comments, the
-  trail with its own timestamps. Merges rather than replaces, deletes nothing,
-  and finishes by checking its counts against the file's. `docs/decisions/0007`.
+  features to work packages, decisions to rows in `decisions`, questions to
+  comments, the trail with its own timestamps. Merges rather than replaces,
+  deletes nothing, and finishes by checking its counts against the file's.
+  `docs/decisions/0007`.
 
 ### Rules
 - `src/domain/rollup.js` — **weighted readiness, completion as three counts,
@@ -52,6 +55,15 @@ model.
   goes through `Date.UTC`.
 - `src/domain/lifecycle.js` — phases, gates, and the rule that a project cannot
   leave a phase until its gate criterion is *recorded* as met.
+- `src/domain/decisions.js` — whether a decision can settle, whether a new
+  dependency would close a cycle, each decision's depth in the gating chain,
+  and what open work an open decision blocks. **Not progress** — nothing here
+  enters `rollup.js`. `docs/decisions/0010`.
+- `src/domain/graph.js` — the one layering walk: a node's depth in a directed
+  graph, the edges that close a loop, and the columns to draw them in.
+  `decisions.layer` delegates to it and the map's relations graph calls it
+  directly. **Not progress** — it requires nothing and reads no field that
+  carries a weight. `docs/decisions/0011`.
 - `src/domain/access.js` — permissions as the **union** of direct and group
   roles. `seesInternal()` is the internal-comment gate.
 - `src/domain/query.js` — the one work package query. Every list, board, chart,
@@ -95,12 +107,20 @@ model.
 - `src/api/views3.js` — boards, backlogs, roadmap, calendar, planner, activity page.
 - `src/api/views4.js` — wiki, meetings, connections, administration, the drawer.
 - `src/api/views5.js` — the git deck, and what one work package is in the repository.
+- `src/api/views6.js` — decisions: the scoped list, the gating graph and what an
+  open one blocks, drawn once by `src/domain/decisions.js` and read here.
+- `src/api/views7.js` — the map: one project as a work-breakdown tree, a
+  relations graph and a decision graph. Computes no figure of its own — every
+  one comes from `rollup.js`, every rank from `src/domain/graph.js`.
+  `docs/decisions/0011`.
 - `src/api/mutations.js` — work packages, comments, gates, shares, attachments.
 - `src/api/mutations2.js` — projects, versions, baselines, sprints, boards, wiki,
   meetings, preferences, allocations, administration, MCP tokens, the email
   intake.
 - `src/api/mutations3.js` — repositories, the type mapping, the repository key, and
   linking a work package to a pull request by hand.
+- `src/api/mutations4.js` — raise a decision, edit or settle one, link and unlink
+  the work waiting on it, add and remove a gating dependency.
 - `src/api/exports.js` — CSV, XLSX, PDF and iCal, each written by hand with the
   reason stated in the header.
 
@@ -118,6 +138,16 @@ model.
 - `public/lib/api.js` — fetch, error surfacing, superseded-request cancellation.
 - `public/lib/md.js` — a markdown renderer that builds nodes, not a string.
 - `public/views/*.js` — one file per screen, matching the API endpoint.
+- `public/views/decisions.js` — the decisions screen: a decision, what waits on
+  it, what it waits on, and the whole gating chain laid out by layer. Rust is
+  legitimate here — an open decision blocking live work — and nowhere else on
+  the screen.
+- `public/views/map.js` — the map screen: three views over one project, the
+  readiness bar and the completion trio side by side at every level, and the
+  two graphs drawn twice — as SVG and as a nested list, CSS choosing at 860px.
+  Read-only; every node links out. Rust is legitimate twice — an open decision
+  blocking live work (the rule imported from `decisions.js`, not restated) and
+  a relation that closes a loop — and nowhere else.
 - `src/cli/tracker.js` — the command line.
 - `src/mcp/server.js` — the MCP server: fifteen tools (six read, nine write), a
   scoped token, a full audit. A write runs as the token's issuer and is recorded
@@ -131,6 +161,19 @@ model.
 - `docs/features.md` — the brief's feature list mapped to code, with the gaps
   named.
 - `docs/api.md`, `docs/schema.md`, `docs/mcp.md`.
+
+### Running unattended
+- `ops/service.ps1` — installs the web server as a Windows **scheduled task**,
+  and starts, stops, reports and removes it. A task rather than an SCM service
+  because `node.exe` has no service control handler; the wrappers that give it
+  one are a new dependency. Boot-as-SYSTEM or logon-as-you.
+- `ops/run-server.cmd` — what the task actually runs. Batch, not PowerShell,
+  because PowerShell 5.1 turns a redirected native stderr into fake errors in the
+  log. Appends to `var/log/server.log`.
+- `ops/register-mcp.ps1` — the MCP server is stdio and **cannot** be a service;
+  this registers it with the client, which launches it. No credential in the
+  client config: `.env` is already loaded by `src/config.js`.
+- `ops/README.md` — both arguments in full.
 
 ## Things that look editable and are not
 
@@ -157,6 +200,11 @@ model.
 | a repository health score | `gitdeck.healthScore()` — hygiene, **not** readiness |
 | a CI success rate | `gitdeck.ciSummary()` — completed runs only, null when none |
 | how much work is mapped | `gitdeck.coverage()` — both directions, counted apart |
+| what an open decision blocks | `decisions.blocking()` — a live `blocks` link only, not `informs` or `arose_from` |
+| a decision's layer in the gating chain | `decisions.layer()` — depth, **not** progress |
+| a node's depth in any graph | `graph.rank()` — one walk, shared; a position in a picture |
+| which relation closes a loop | `graph.cycles()` — the edge, so somebody knows which link to cut |
+| every figure on the map | `rollup.js`, unchanged — `views7.js` computes none |
 
 ## The one path that leaves this machine
 

@@ -35,6 +35,8 @@
       { route: 'planner', label: 'Team planner' },
     ] },
     { group: 'Knowledge', items: [
+      { route: 'map', label: 'Map', scoped: true },
+      { route: 'decisions', label: 'Decisions', scoped: true },
       { route: 'wiki', label: 'Wiki & documents', scoped: true },
       { route: 'meetings', label: 'Meetings', scoped: true },
       { route: 'deck', label: 'Git deck', scoped: true },
@@ -57,6 +59,8 @@
     calendar: 'CALENDAR',
     planner: 'TEAM PLANNER',
     activity: 'ACTIVITY & INBOX',
+    map: 'MAP',
+    decisions: 'DECISIONS',
     wiki: 'WIKI & DOCUMENTS',
     meetings: 'MEETINGS',
     deck: 'GIT DECK',
@@ -65,7 +69,7 @@
   };
 
   const SCOPED = new Set(Object.keys(CRUMBS).filter((r) => (
-    ['overview', 'work', 'gantt', 'boards', 'backlogs', 'calendar', 'wiki', 'meetings', 'deck'].includes(r)
+    ['overview', 'work', 'gantt', 'boards', 'backlogs', 'calendar', 'map', 'decisions', 'wiki', 'meetings', 'deck'].includes(r)
   )));
 
   const HEALTH = {
