@@ -33,6 +33,7 @@
     activity: global.viewActivity,
     wiki: global.viewWiki,
     meetings: global.viewMeetings,
+    deck: global.viewDeck,
     connect: global.viewConnect,
     admin: global.viewAdmin,
   };
@@ -53,6 +54,7 @@
     activity: [],
     wiki: ['project', 'doc'],
     meetings: ['project', 'meeting'],
+    deck: ['project', 'repo', 'kind'],
     connect: [],
     admin: ['tab'],
   };

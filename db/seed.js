@@ -498,6 +498,68 @@ async function seedDemoPartTwo(ref, ctx) {
     default_branch: 'main', state: 'connected', detail: 'main · clean',
   });
 
+  // ------------------------------------------------------------- the git deck
+  //
+  // The repository above as it looks after one pull. Seeded rather than fetched
+  // — nothing here has a token — so the deck, the mapping table and the drawer's
+  // repository panel all have something true to draw. `db/demo-data.js` says why
+  // one of the keys deliberately matches nothing.
+  await db.run("UPDATE repositories SET slug = 'seedfall/seedfall', pull_state = 'ok', "
+    + "pull_detail = 'pulled cleanly' WHERE id = ?", [repo]);
+
+  for (const [num, refKey] of D.REF_KEYS) {
+    await db.run('UPDATE work_packages SET ref_key = ? WHERE id = ?', [refKey, wp[num]]);
+  }
+
+  const gitItem = {};
+  for (const r of D.GIT_ITEMS) {
+    const [kind, ref2, title, state, author, head, base, bodyText, labels,
+      openedDays, updatedDays, closedDays, mergedDays, conclusion, severity] = r;
+    const days = (n) => (n === null || n === undefined ? null : minutesAgo(60 * 24 * n));
+    gitItem[`${kind}:${ref2}`] = await db.insert('git_items', {
+      repository_id: repo, kind, ref: ref2, title, state, author,
+      head_branch: head, base_branch: base, body: bodyText, labels,
+      url: kind === 'release'
+        ? `https://github.com/seedfall/seedfall/releases/tag/${ref2}`
+        : kind === 'issue'
+          ? `https://github.com/seedfall/seedfall/issues/${ref2}`
+          : kind === 'pull_request'
+            ? `https://github.com/seedfall/seedfall/pull/${ref2}`
+            : null,
+      opened_at: days(openedDays), updated_at: days(updatedDays),
+      closed_at: days(closedDays), merged_at: days(mergedDays),
+      conclusion, severity,
+      duration_sec: kind === 'workflow_run' ? 214 : null,
+      comment_count: kind === 'pull_request' || kind === 'issue' ? 3 : null,
+      pulled_at: minutesAgo(60),
+    });
+  }
+
+  for (const [num, kind, ref2, relation, origin, matchedKey, matchedIn] of D.GIT_LINKS) {
+    await db.insert('work_package_git_links', {
+      work_package_id: wp[num], git_item_id: gitItem[`${kind}:${ref2}`],
+      relation, origin, matched_key: matchedKey, matched_in: matchedIn,
+      actor_label: 'gitdeck', created_at: minutesAgo(60),
+    });
+  }
+
+  // Keys the repository used that no work package carries. Kept on purpose.
+  for (const [candidate, matchedIn, seen] of [
+    ['F-LOAD-207', 'branch', 3], ['B-ENG-003', 'body', 1], ['PH-2', 'body', 1],
+  ]) {
+    await db.insert('git_unmatched_keys', {
+      repository_id: repo, candidate, matched_in: matchedIn, seen_count: seen,
+      first_seen_at: minutesAgo(60 * 24 * 4), last_seen_at: minutesAgo(60),
+    });
+  }
+
+  await db.insert('git_pulls', {
+    repository_id: repo, actor_id: user.stephen, actor_label: 'gitdeck', state: 'ok',
+    started_at: minutesAgo(61), finished_at: minutesAgo(60),
+    items_seen: D.GIT_ITEMS.length, items_new: D.GIT_ITEMS.length,
+    links_made: D.GIT_LINKS.length, unmatched: 3, rate_remaining: 4863,
+  });
+
   for (const [name, kind, target, state, detail, pkey, tokenEnv] of D.INTEGRATIONS) {
     await db.insert('integrations', {
       kind, name, target, state, detail,

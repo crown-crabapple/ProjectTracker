@@ -66,6 +66,8 @@ that assembles them itself will eventually get one of those rules wrong.
 | `GET /api/meetings?project&meeting` | the schedule and one meeting's agenda, minutes and outcomes |
 | `GET /api/connect` | integrations, repositories, revisions, the MCP surface and its audit, the email intake. **Administrator only.** |
 | `GET /api/admin?tab=fields\|workflow\|auto\|roles\|theme\|initiation` | **Administrator only.** |
+| `GET /api/deck?project&repo` | the git deck: repositories with their health score, CI summary and mapping coverage, the mirrored pull requests, issues, milestones, releases, CI runs and alerts with the work packages each is linked to, the keys that matched nothing, recent pulls, and the type → forge-object mapping table |
+| `GET /api/wp/:id/git` | what one work package is in the repository: what its type maps to, the keys it is addressable by, its links (removed ones included, marked), and its linked commits |
 | `GET /api/wp/:id` | the drawer: every attribute, relations, watchers, files, time entries, comments, shares, custom values, baseline, progress with its basis named |
 
 ## Write
@@ -108,6 +110,18 @@ that assembles them itself will eventually get one of those rules wrong.
 | `POST` | `/api/admin/mcp-tokens` | Returns the secret **once**. Only its sha256 is stored. |
 | `DELETE` | `/api/admin/mcp-tokens/:id` | |
 | `POST` | `/api/admin/initiation/:id` | `{ approve, note, code }` |
+
+## The git deck
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/api/repositories` | Connect one. `token_env` is the NAME of an environment variable and a value shaped like a token is refused with the reason. Needs `manage_repositories`. |
+| `PATCH` | `/api/repositories/:id` | Change where it is, or which variable its token comes from. |
+| `POST` | `/api/repositories/:id/pull` | **The only route that reaches the network.** Fetches, mirrors, matches, and — where the repository is configured to — moves a status through the ordinary workflow. `{ "dry_run": true }` does everything except write and is still recorded. Returns what it saw, what it linked, what it held back and every key that matched nothing. |
+| `POST` | `/api/repositories/:id/mapping` | Override what one type maps to in this repository, and optionally what a merge or a close does to it. Both status fields default to nothing. |
+| `POST` | `/api/wp/:id/ref-key` | Set the key the repository knows this work package by — `F-LOAD-012`. Unique per project; a shape no branch could carry is refused. |
+| `POST` | `/api/wp/:id/git-links` | Link by `item_id`, or by `kind` and `ref` ("PR 978"). The item must already be in the mirror: nothing here invents a forge object it has not seen. |
+| `DELETE` | `/api/git-links/:id` | Remove a link. **The row is kept** and no pull will ever re-make that link — see `docs/decisions/0008`. |
 
 ## No account needed
 

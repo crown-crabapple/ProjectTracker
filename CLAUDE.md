@@ -103,6 +103,31 @@ calls the same functions in `src/api/mutations*.js` that the web app calls, so
 the status workflow and the rest are not reimplemented behind them.
 `docs/decisions/0006`.
 
+### A pull mirrors, it does not decide
+
+`src/gitdeck/pull.js` writes what the forge says and changes no work package's
+status until a repository is configured to — every status rule ships NULL. When
+one is set the move still goes through `mutations.updateWorkPackage`, so
+`status_transitions` refuses an illegal one exactly as it would refuse a person's,
+and the trail records `gitdeck` instead of whoever ran the pull.
+
+### A link says why it exists, and a person outranks the matcher
+
+Every row in `work_package_git_links` carries `origin`, `matched_key` and
+`matched_in`, and no screen paints a link a regex made the same as one a person
+made. A key in a title or a branch is a claim; a key in a body is a mention until
+a closing verb claims it. A link somebody removed keeps its row and is never
+re-made by a pull — an integration that overturns a decision every quarter of an
+hour is one nobody leaves switched on. A key that matches nothing is kept in
+`git_unmatched_keys`, not dropped.
+
+### A health score is not readiness
+
+`src/domain/gitdeck.js` computes repository health, CI success and mapping
+coverage. None of them is progress, none enters a denominator in `rollup.js`, and
+every surface that shows one says which is which. This is the same mistake as the
+SeedFall *built* figure, one layer out.
+
 ### Automations fire after the commit, never inside it
 
 One that ran inside would see uncommitted state; one that failed would roll back
@@ -191,8 +216,10 @@ Open questions   — what you need to keep going.
 node db/migrate.js [--status|--force]   # schema
 node db/seed.js [--reference]           # reference data, and the demo portfolio
 node db/import-state.js FILE [--dry-run]  # merge a SeedFall tracker state file
+node src/cli/tracker.js deck              # repositories, health, CI, what is mapped
+node src/cli/tracker.js pull [--dry-run]  # fetch a repository, re-match its keys
 npm start                               # the web server
-npm test                                # 200 checks, throwaway database
+npm test                                # 318 checks, throwaway database
 node src/cli/tracker.js help
 node src/mcp/server.js                  # stdio
 ```
@@ -216,8 +243,12 @@ Named so nobody builds them thinking they were forgotten:
 - **Real-time push.** Notifications are correct and immediate in the database;
   delivery waits for the next request. SSE is a small change and is not
   pretended to be there.
-- **Outbound integration clients.** Nothing polls GitHub, GitLab, git, SVN,
-  XWiki or IMAP. The tables, the display and the inbound endpoints are real.
+- **A scheduler, and webhook receivers.** The forge client is real — the git deck
+  pulls GitHub, GitLab and Forgejo — but a pull only ever happens because a
+  person pressed PULL, ran `pt pull` or called the `git.pull` MCP tool. Put the
+  CLI in cron if you want it hourly. Nothing polls git, SVN, XWiki or IMAP at
+  all; those tables, displays and inbound endpoints are real and the fetchers are
+  not written.
 - **Character-level collaborative editing.** Presence plus a refusal to merge —
   `docs/decisions/0004` has the argument, and it is the most likely thing to
   clear the dependency bar later.

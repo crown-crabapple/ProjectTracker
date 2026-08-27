@@ -16,7 +16,9 @@
  *
  *   features   one work package each, type FEATURE, subject = the feature id,
  *              the note as the description, and the area (LOAD, UI, ENG …) in a
- *              custom field.
+ *              custom field. The feature id is also stored as the work package's
+ *              REPOSITORY KEY, which is what makes a branch called
+ *              feature/f-load-012-decisions find it after the import.
  *   questions  a comment on the feature they name. The file keeps the answer and
  *              not the question, and the comment says so rather than presenting
  *              half a conversation as a whole one.
@@ -55,6 +57,7 @@ const fs = require('fs');
 const path = require('path');
 const db = require('../src/db');
 const rollup = require('../src/domain/rollup');
+const gitdeck = require('../src/domain/gitdeck');
 
 const args = process.argv.slice(2);
 const has = (flag) => args.includes(flag);
@@ -286,7 +289,7 @@ async function importInto(tx, { state, ref, owner, code, actorLabel }) {
 
   // ----------------------------------------------------------------- features
   const existing = new Map(
-    (await tx.query('SELECT id, subject, status_id, description FROM work_packages WHERE project_id = ?',
+    (await tx.query('SELECT id, subject, status_id, description, ref_key FROM work_packages WHERE project_id = ?',
       [project.id])).map((w) => [w.subject, w])
   );
   const wpIdOf = new Map();
@@ -301,6 +304,12 @@ async function importInto(tx, { state, ref, owner, code, actorLabel }) {
         project_id: project.id,
         type_id: ref.typeId,
         subject: featureId,
+        // The same string in two columns on purpose. The SUBJECT is what a
+        // person reads; REF_KEY is what a repository is matched against, and it
+        // is a column rather than a search over subjects because a subject is
+        // free text somebody will edit — 'F-LOAD-012 parse decisions' is a
+        // better subject and would silently stop the branch matching.
+        ref_key: gitdeck.isValidRefKey(featureId) ? featureId.toUpperCase() : null,
         description: note,
         status_id: status.id,
         priority_id: ref.priorityId,
@@ -334,6 +343,9 @@ async function importInto(tx, { state, ref, owner, code, actorLabel }) {
         changes.closed_at = status.is_closed && feature.updated ? ISO_TO_SQL(feature.updated) : null;
       }
       if ((known.description || null) !== note) changes.description = note;
+      // An import that ran before the repository key existed left it null; a
+      // re-run fills it rather than leaving those features unmatchable for ever.
+      if (!known.ref_key && gitdeck.isValidRefKey(featureId)) changes.ref_key = featureId.toUpperCase();
       if (Object.keys(changes).length) {
         const was = await tx.one('SELECT label FROM statuses WHERE id = ?', [known.status_id]);
         await tx.update('work_packages', known.id, changes);

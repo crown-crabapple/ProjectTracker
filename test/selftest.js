@@ -64,7 +64,7 @@ async function throws(name, fn, expected) {
 
 // ------------------------------------------------------- pure, no database yet
 
-function pureChecks() {
+async function pureChecks() {
   const rollup = require('../src/domain/rollup');
   const sched = require('../src/domain/scheduling');
   const subject = require('../src/domain/subject');
@@ -203,6 +203,118 @@ function pureChecks() {
     const uid = (t) => /UID:(\S+)/.exec(t)[1];
     return uid(a) === uid(b);
   })(), 'an unstable UID duplicates every event on every refresh');
+
+  // --- the git deck: which repository object is which work package
+  //
+  // These are the checks that stop the mapping claiming more than it knows. A
+  // link is a claim about somebody's work, and the difference between 'closes
+  // WP-112' and 'blocked on WP-112' is the whole of it.
+  const gitdeck = require('../src/domain/gitdeck');
+  const forge = require('../src/gitdeck/client');
+
+  const RULE = { item_kind: 'pull_request', relation: 'implements', key_prefix: 'F' };
+  const index = new Map([
+    ['WP-112', { id: 112, project_id: 1, type_name: 'FEATURE', rule: RULE }],
+    ['F-UI-007', { id: 112, project_id: 1, type_name: 'FEATURE', rule: RULE }],
+    ['B-ENG-003', { id: 200, project_id: 1, type_name: 'BUG', rule: { item_kind: 'issue', relation: 'fixes', key_prefix: 'B' } }],
+    ['F-OTHER-001', { id: 900, project_id: 2, type_name: 'FEATURE', rule: RULE }],
+  ]);
+  const match = (item) => gitdeck.matchItem(item, index, { repositoryProjectId: 1 });
+
+  eq('a key in the title is what the change is',
+    match({ kind: 'pull_request', title: 'F-UI-007 weighted rollup' }).links
+      .map((l) => [l.matched_key, l.relation, l.matched_in]),
+    [['F-UI-007', 'implements', 'title']]);
+  eq('a key in the body is a mention until a verb claims it',
+    match({ kind: 'pull_request', title: 'x', body: 'blocked on WP-112' }).links.map((l) => l.relation),
+    ['mentions']);
+  eq('and a closing verb makes the same key a claim',
+    match({ kind: 'pull_request', title: 'x', body: 'closes WP-112' }).links.map((l) => l.relation),
+    ['implements']);
+  eq('a lowercase key in a branch name still matches',
+    match({ kind: 'pull_request', title: 'x', head_branch: 'feature/f-ui-007-rollup' }).links
+      .map((l) => [l.matched_key, l.origin]),
+    [['F-UI-007', 'branch']]);
+  check('but a lowercase key in a title does not',
+    match({ kind: 'pull_request', title: 'fix the f-ui-007 connector' }).links.length === 0,
+    'an English sentence became a claim about somebody\'s feature');
+  eq('a type mapped to issues is only mentioned by a pull request',
+    match({ kind: 'pull_request', title: 'B-ENG-003 crash' }).links.map((l) => l.relation), ['mentions']);
+  eq('and implements the issue it is mapped to',
+    match({ kind: 'issue', title: 'B-ENG-003 crash' }).links.map((l) => l.relation), ['fixes']);
+  eq('a key belonging to another project is not linked across',
+    match({ kind: 'pull_request', title: 'F-OTHER-001 elsewhere' }).unmatched
+      .map((u) => [u.candidate, u.reason]),
+    [['F-OTHER-001', 'that key belongs to another project']]);
+  eq('a key nothing carries is reported rather than dropped',
+    match({ kind: 'pull_request', title: 'F-LOAD-207 glossary' }).unmatched.map((u) => u.candidate),
+    ['F-LOAD-207']);
+  eq('one key written twice is one link',
+    match({
+      kind: 'pull_request', title: 'F-UI-007 rollup', body: 'F-UI-007 again',
+      head_branch: 'feature/f-ui-007',
+    }).links.length, 1);
+
+  check('a repository key must be a shape a branch could carry',
+    gitdeck.isValidRefKey('F-LOAD-012') && gitdeck.isValidRefKey('PH-2')
+    && !gitdeck.isValidRefKey('the loader') && !gitdeck.isValidRefKey('F-LOAD'),
+    'a key no branch name could match is a key that silently never links');
+
+  // The health score is gitdeck's, and these are its numbers. 78 to start, minus
+  // 8 for a stale issue and 3 for the open one, plus 10 for a push this week.
+  const staleDay = new Date(Date.now() - 40 * 86400000).toISOString().slice(0, 19).replace('T', ' ');
+  const health = gitdeck.healthScore({
+    issues: [{ updated_at: staleDay }],
+    pushed_at: new Date(Date.now() - 2 * 86400000).toISOString().slice(0, 19).replace('T', ' '),
+    now: Date.now(),
+  });
+  eq('the health score is gitdeck\'s arithmetic', health.score, 77);
+  check('and says which signals it could actually read',
+    health.basis.includes('push recency') && !health.basis.includes('traffic'),
+    JSON.stringify(health.basis));
+  check('security alerts nobody may read are not scored as none',
+    gitdeck.healthScore({ issues: [], security_alerts_unavailable: true })
+      .basis.join(' ').includes('UNAVAILABLE'),
+    'zero open alerts and no permission to look are opposite facts');
+
+  const ci = gitdeck.ciSummary([
+    { state: 'completed', conclusion: 'success', duration_sec: 100 },
+    { state: 'completed', conclusion: 'failure', duration_sec: 200 },
+    { state: 'completed', conclusion: 'cancelled', duration_sec: 10 },
+    { state: 'completed', conclusion: 'skipped' },
+    { state: 'in_progress', conclusion: null },
+  ]);
+  eq('a CI rate counts successes and failures only', ci.success_pct, 50);
+  eq('and cancelled, skipped and running runs are counted apart',
+    [ci.cancelled, ci.skipped, ci.running], [1, 1, 1]);
+  check('a pipeline where nothing has finished has no rate, not a rate of zero',
+    gitdeck.ciSummary([{ state: 'in_progress', conclusion: null }]).success_pct === null,
+    'zero per cent means every run failed, which is a different morning');
+
+  const cover = gitdeck.coverage({
+    workPackages: [
+      { id: 1, git_item_kind: 'pull_request' },
+      { id: 2, git_item_kind: 'pull_request' },
+      { id: 3, git_item_kind: 'none' },
+    ],
+    items: [{ id: 10, kind: 'pull_request' }, { id: 11, kind: 'pull_request' }],
+    links: [{ work_package_id: 1, git_item_id: 10 }],
+  });
+  eq('coverage counts both directions', [cover.pct, cover.items_pct], [50, 50]);
+  check('a type that maps to nothing is excluded, not counted as missing',
+    cover.mappable === 2 && cover.excluded_types === 1,
+    'otherwise the figure improves by deleting phases');
+
+  eq('a repository URL yields the owner and name the API needs',
+    ['https://github.com/seedfall/seedfall.git', 'git@github.com:seedfall/seedfall',
+      'https://codeberg.org/x/y/'].map(forge.slugFromUrl),
+    ['seedfall/seedfall', 'seedfall/seedfall', 'x/y']);
+  await throws('a plain git repository has no API client and says so',
+    async () => forge.connectionFor({ scm: 'git', name: 'local', url: '~/code/x' }), 'no API client');
+  await throws('a forgejo repository with no api_base is refused rather than guessed',
+    async () => forge.connectionFor({ scm: 'forgejo', name: 'cb', url: 'https://codeberg.org/x/y' }),
+    'no api_base');
+
 
   // --- passwords
   const hashed = passwords.hash('correct horse');
@@ -701,6 +813,246 @@ async function databaseChecks(db) {
     () => importer.runImport({ file: stateFile, code: 'ZZ', asLogin: 'stephen' }), '"invented"');
   fs.rmSync(importDir, { recursive: true, force: true });
 
+  // --- the git deck, end to end against a stubbed forge
+  //
+  // The suite must not reach the network any more than it may reach the real
+  // database, so the client is created over a stub `fetch`. What is exercised is
+  // everything after the response: the normalising, the matching, the mirror,
+  // the trail, and the two rules that stop a pull overruling a person.
+  const gitdeckDomain = require('../src/domain/gitdeck');
+  const forgeClient = require('../src/gitdeck/client');
+  const gitPull = require('../src/gitdeck/pull');
+  const mut3 = require('../src/api/mutations3');
+  const views5 = require('../src/api/views5');
+
+  // The mapping the six types ship with. The example in the brief is the third
+  // row: a FEATURE is a pull request, and F- is the letter its keys start with.
+  const typeMap = await db.query(
+    'SELECT name, git_item_kind, git_relation, git_key_prefix FROM work_package_types ORDER BY position'
+  );
+  eq('every type says what it is in a repository',
+    typeMap.map((t) => [t.name, t.git_item_kind, t.git_relation, t.git_key_prefix]),
+    [['PHASE', 'milestone', 'tracks', 'PH'], ['EPIC', 'issue', 'tracks', 'E'],
+      ['FEATURE', 'pull_request', 'implements', 'F'], ['TASK', 'issue', 'implements', 'T'],
+      ['BUG', 'issue', 'fixes', 'B'], ['MILESTONE', 'release', 'releases', 'M']]);
+
+  const seedRepo = await db.one("SELECT * FROM repositories WHERE slug = 'seedfall/seedfall'");
+  check('the demo repository knows its owner and name', Boolean(seedRepo && seedRepo.slug));
+  check('and records the name of the variable its token is read from, never a token',
+    seedRepo.token_env === 'GITHUB_TOKEN'
+    && !Object.values(seedRepo).some((v) => typeof v === 'string' && /^gh[pousr]_/.test(v)),
+    JSON.stringify(seedRepo));
+
+  // The demo's links are seeded rows; the matcher is code. If they disagree,
+  // one of them is lying about what a pull would do.
+  const demoRules = await gitPull.rulesFor(seedRepo.id);
+  const demoIndex = await gitPull.indexFor(seedRepo.project_id, demoRules);
+  const demoItems = await db.query('SELECT * FROM git_items WHERE repository_id = ?', [seedRepo.id]);
+  const derivedLinks = [];
+  for (const item of demoItems) {
+    for (const link of gitdeckDomain.matchItem(item, demoIndex,
+      { repositoryProjectId: Number(seedRepo.project_id) }).links) {
+      derivedLinks.push([Number(link.work_package_id), item.kind, item.ref, link.relation, link.matched_key]);
+    }
+  }
+  const seededLinks = (await db.query(`
+    SELECT l.work_package_id, gi.kind, gi.ref, l.relation, l.matched_key
+      FROM work_package_git_links l JOIN git_items gi ON gi.id = l.git_item_id
+     WHERE gi.repository_id = ?`, [seedRepo.id]))
+    .map((l) => [Number(l.work_package_id), l.kind, l.ref, l.relation, l.matched_key]);
+  const asText = (rows) => rows.map((r) => r.join(' ')).sort();
+  eq('the demo links are exactly what the matcher would produce', asText(seededLinks), asText(derivedLinks));
+
+  // A stubbed GitHub. Two pull requests, an issue, a run, and one endpoint this
+  // token may not read.
+  const forgeResponses = {
+    '/repos/seedfall/seedfall/pulls': [
+      {
+        number: 1978, title: 'F-UI-021 filterable task list', state: 'open',
+        user: { login: 'stephen' }, head: { ref: 'feature/f-ui-021-list' }, base: { ref: 'main' },
+        html_url: 'https://forge.invalid/pull/1978', body: 'Blocked on WP-112 for now.',
+        labels: [{ name: 'ui' }], created_at: '2026-08-20T10:00:00Z', updated_at: '2026-08-25T10:00:00Z',
+      },
+      {
+        number: 1979, title: 'F-UI-007 weighted rollup', state: 'closed',
+        merged_at: '2026-08-24T09:00:00Z', user: { login: 'modell' },
+        head: { ref: 'feature/f-ui-007-rollup' }, base: { ref: 'main' },
+        html_url: 'https://forge.invalid/pull/1979', body: null, labels: [],
+        created_at: '2026-08-19T10:00:00Z', updated_at: '2026-08-24T09:00:00Z',
+      },
+    ],
+    '/repos/seedfall/seedfall/issues': [
+      {
+        number: 1300, title: 'F-NEW-999 something nobody has heard of', state: 'open',
+        user: { login: 'jlin' }, html_url: 'https://forge.invalid/issues/1300', body: null,
+        labels: [], created_at: '2026-08-18T10:00:00Z', updated_at: '2026-08-26T10:00:00Z',
+      },
+      { number: 1301, title: 'a pull request the issues endpoint also returned', state: 'open',
+        pull_request: {}, html_url: 'https://forge.invalid/issues/1301',
+        created_at: '2026-08-18T10:00:00Z', updated_at: '2026-08-18T10:00:00Z' },
+    ],
+    '/repos/seedfall/seedfall/milestones': [],
+    '/repos/seedfall/seedfall/releases': [],
+    '/repos/seedfall/seedfall/branches': [],
+    '/repos/seedfall/seedfall/actions/runs': { workflow_runs: [] },
+    '/repos/seedfall/seedfall/dependabot/alerts': 'FORBIDDEN',
+    '/repos/seedfall/seedfall/commits': [
+      { sha: 'feed1234beef', html_url: 'https://forge.invalid/commit/feed1234beef',
+        commit: { message: 'F-UI-021 wire the filter', author: { name: 'Stephen', date: '2026-08-25T08:00:00Z' } } },
+    ],
+  };
+  let forgeCalls = 0;
+  const stubFetch = (url) => {
+    forgeCalls += 1;
+    const path = String(url).replace('https://api.github.com', '').split('?')[0];
+    const data = forgeResponses[path];
+    const headers = new Map([['x-ratelimit-remaining', '4321']]);
+    headers.get = Map.prototype.get.bind(headers);
+    if (data === undefined) {
+      return Promise.resolve({ ok: false, status: 500, headers, json: async () => ({}) });
+    }
+    if (data === 'FORBIDDEN') {
+      return Promise.resolve({ ok: false, status: 403, headers, json: async () => ({}) });
+    }
+    return Promise.resolve({ ok: true, status: 200, headers, json: async () => data });
+  };
+  const stubClient = forgeClient.create({ fetchImpl: stubFetch });
+
+  const dryPull = await gitPull.pullRepository(ctx, seedRepo.id, { dryRun: true, client: stubClient });
+  const beforeItems = Number(await db.scalar('SELECT COUNT(*) FROM git_items WHERE repository_id = ?', [seedRepo.id]));
+  eq('a dry run writes no items', beforeItems, demoItems.length);
+  check('but is recorded as having happened',
+    Number(await db.scalar("SELECT COUNT(*) FROM git_pulls WHERE state = 'dry_run'")) === 1);
+  check('a forbidden endpoint is reported and does not fail the pull',
+    dryPull.problems.some((p) => /dependabot/.test(p)) && dryPull.items_seen > 0, JSON.stringify(dryPull.problems));
+
+  const pulled = await gitPull.pullRepository(ctx, seedRepo.id, { client: stubClient });
+  eq('the dry run and the real pull agree on what they would link',
+    [dryPull.items_seen, dryPull.links_made], [pulled.items_seen, pulled.links_made]);
+  check('a pull request the issues endpoint also returned is mirrored once',
+    Number(await db.scalar(
+      "SELECT COUNT(*) FROM git_items WHERE repository_id = ? AND ref IN ('1301')", [seedRepo.id]
+    )) === 0, 'GitHub returns pull requests from /issues; mirroring both makes two of everything');
+
+  const linkedTo1978 = await db.query(`
+    SELECT wp.wp_key, wp.ref_key, l.relation, l.origin, l.matched_key, l.matched_in
+      FROM work_package_git_links l
+      JOIN git_items gi ON gi.id = l.git_item_id
+      JOIN work_packages wp ON wp.id = l.work_package_id
+     WHERE gi.ref = '1978' AND gi.repository_id = ? ORDER BY l.relation`, [seedRepo.id]);
+  eq('F-UI-021 in a title implements the pull request, WP-112 in the body only mentions it',
+    linkedTo1978.map((l) => [l.matched_key, l.relation, l.matched_in]),
+    [['F-UI-021', 'implements', 'title'], ['WP-112', 'mentions', 'body']]);
+
+  check('a key that matches nothing is kept with the number of times it was seen',
+    Number(await db.scalar(
+      'SELECT seen_count FROM git_unmatched_keys WHERE repository_id = ? AND candidate = ?',
+      [seedRepo.id, 'F-NEW-999']
+    )) >= 1);
+
+  const commitLinked = await db.scalar(`
+    SELECT COUNT(*) FROM revision_work_packages rwp
+      JOIN repository_revisions rv ON rv.id = rwp.revision_id
+     WHERE rv.identifier = 'feed1234beef'`);
+  check('a key in a commit message links the commit to the work package', Number(commitLinked) === 1);
+
+  const pullTrail = await db.one(`
+    SELECT actor_id, actor_label, kind, verb FROM activities
+     WHERE kind = 'repo' AND verb = 'pulled' ORDER BY id DESC LIMIT 1`);
+  check('a pull is in the activity trail as a machine, not as the person who ran it',
+    pullTrail && pullTrail.actor_label === 'gitdeck' && pullTrail.actor_id === null,
+    JSON.stringify(pullTrail));
+
+  // A link a person removed is a decision. The next pull must not overturn it.
+  const link1978 = await db.one(`
+    SELECT l.id FROM work_package_git_links l JOIN git_items gi ON gi.id = l.git_item_id
+     WHERE gi.ref = '1978' AND l.relation = 'implements'`);
+  await mut3.unlinkWorkPackage(ctx, link1978.id);
+  const afterUnlink = await db.one('SELECT removed_at, removed_by FROM work_package_git_links WHERE id = ?',
+    [link1978.id]);
+  check('removing a link keeps its row and says who removed it',
+    afterUnlink.removed_at !== null && Number(afterUnlink.removed_by) === Number(ctx.user.id));
+  const secondPull = await gitPull.pullRepository(ctx, seedRepo.id, { client: stubClient });
+  check('and the next pull holds it back rather than re-making it',
+    secondPull.links_held >= 1
+    && (await db.scalar('SELECT removed_at FROM work_package_git_links WHERE id = ?', [link1978.id])) !== null,
+    `held ${secondPull.links_held}`);
+  await mut3.linkWorkPackage(ctx, 121, { item_id: Number(await db.scalar(
+    "SELECT id FROM git_items WHERE ref = '1978' AND repository_id = ?", [seedRepo.id]
+  )), relation: 'implements' });
+  check('a person can put it back by hand, which a pull cannot',
+    (await db.scalar('SELECT removed_at FROM work_package_git_links WHERE id = ?', [link1978.id])) === null);
+
+  // The status rule. Off by default, and even when on it goes through the
+  // workflow rather than around it.
+  eq('a pull moves no status until a repository is told to',
+    pulled.moves.length, 0);
+  const featureType = await db.scalar("SELECT id FROM work_package_types WHERE name = 'FEATURE'");
+  const doneStatus = await db.scalar("SELECT id FROM statuses WHERE code = 'done'");
+  const buildStatus = await db.scalar("SELECT id FROM statuses WHERE code = 'in_build'");
+  await db.run(`
+    INSERT INTO git_type_rules (repository_id, type_id, item_kind, relation, key_prefix, merged_status_id)
+    VALUES (?, ?, 'pull_request', 'implements', 'F', ?)`, [seedRepo.id, featureType, doneStatus]);
+  await db.run('UPDATE work_packages SET status_id = ? WHERE id = 112', [buildStatus]);
+  const withRule = await gitPull.pullRepository(ctx, seedRepo.id, { client: stubClient });
+  eq('a merged pull request moves the work package it implements',
+    Number(await db.scalar('SELECT status_id FROM work_packages WHERE id = 112')), Number(doneStatus));
+  check('and the move is in the trail as the machine',
+    Boolean(await db.one(`
+      SELECT id FROM activities WHERE work_package_id = 112 AND kind = 'status'
+        AND actor_label = 'gitdeck' AND actor_id IS NULL ORDER BY id DESC LIMIT 1`)),
+    JSON.stringify(withRule.moves));
+
+  const notStarted = await db.scalar("SELECT id FROM statuses WHERE code = 'not_started'");
+  await db.run('UPDATE work_packages SET status_id = ? WHERE id = 112', [notStarted]);
+  const refused = await gitPull.pullRepository(ctx, seedRepo.id, { client: stubClient });
+  check('but the status workflow still refuses a move it does not have',
+    Number(await db.scalar('SELECT status_id FROM work_packages WHERE id = 112')) === Number(notStarted)
+    && refused.problems.some((p) => /cannot move straight/.test(p)),
+    JSON.stringify(refused.problems));
+  await db.run('UPDATE work_packages SET status_id = ? WHERE id = 112', [buildStatus]);
+  await db.run('DELETE FROM git_type_rules WHERE repository_id = ?', [seedRepo.id]);
+
+  // The repository key: what makes F-LOAD-012 findable at all.
+  await throws('a repository key no branch could carry is refused',
+    () => mut3.setRefKey(ctx, 123, 'the loader'), 'not a key a repository could carry');
+  await throws('and two work packages cannot share one in a project',
+    () => mut3.setRefKey(ctx, 123, 'F-LOAD-012'), 'already carries the key');
+  const keyed = await mut3.setRefKey(ctx, 123, 'f-ui-030');
+  eq('a repository key is stored as it is written in a title', keyed.ref_key, 'F-UI-030');
+
+  await throws('a token pasted into token_env is refused rather than stored',
+    () => mut3.createRepository(ctx, {
+      project_id: 1, scm: 'github', name: 'x/y', url: 'https://github.com/x/y',
+      token_env: 'ghp_0123456789abcdefghijklmnopqrstuvwxyz',
+    }), 'looks like a token');
+  await throws('and so is anything else that is not a variable name',
+    () => mut3.createRepository(ctx, {
+      project_id: 1, scm: 'github', name: 'x/y', url: 'https://github.com/x/y',
+      token_env: 'my token please',
+    }), 'not an environment variable name');
+  await throws('a forgejo repository must say where its forge is',
+    () => mut3.createRepository(ctx, {
+      project_id: 1, scm: 'forgejo', name: 'x/y', url: 'https://codeberg.org/x/y',
+    }), 'api_base');
+
+  const deckPayload = await views5.deck(ctx, { projectId: 1 });
+  check('the deck reports a health score and says it is not readiness',
+    deckPayload.repositories.some((r) => r.health && typeof r.health.score === 'number')
+    && /not readiness|neither is readiness|readiness/i.test(deckPayload.note),
+    deckPayload.note);
+  check('a repository nothing has been pulled from has no health score at all',
+    deckPayload.repositories.some((r) => r.scm === 'git' && r.health === null),
+    'a number that looks computed and is not is worse than a blank');
+  eq('the deck names what a FEATURE maps to',
+    deckPayload.mapping.find((m) => m.type === 'FEATURE').example,
+    'F-LOAD-012 maps to pull request #978');
+  check('the pull requests it fetched are on the deck',
+    deckPayload.items.some((i) => i.kind === 'pull_request' && i.ref === '1978'),
+    `${deckPayload.items.length} items`);
+  check('and the forge was only ever reached through the stub', forgeCalls > 0);
+
+
   // --- the MCP surface
   const mcpRead = await mut2.issueMcpToken(ctx, { name: 'selftest read', scope: 'read' });
   check('an MCP token is returned once', mcpRead.secret.startsWith('pt_mcp_'));
@@ -714,6 +1066,9 @@ async function databaseChecks(db) {
     { jsonrpc: '2.0', id: 2, method: 'tools/list' },
     { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'portfolio.status', arguments: {} } },
     { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'summary.write', arguments: { body: 'x' } } },
+    { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'git.links', arguments: { key: 'F-LOAD-012' } } },
+    { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'git.deck', arguments: {} } },
+    { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'git.pull', arguments: { repository: 'seedfall/seedfall' } } },
   ]);
   const byId = new Map(mcp.map((m) => [m.id, m]));
   check('the MCP server answers initialize', Boolean(byId.get(1) && byId.get(1).result.serverInfo));
@@ -723,6 +1078,15 @@ async function databaseChecks(db) {
   check('portfolio.status returns projects', /"projects"/.test(byId.get(3).result.content[0].text));
   check('a read token calling the write tool is refused',
     Boolean(byId.get(4).error) && /read-scoped/.test(byId.get(4).error.message));
+  check('an assistant can ask what a repository key maps to, by that key',
+    /pull request|pull_request/.test(byId.get(5).result.content[0].text)
+    && /F-LOAD-012/.test(byId.get(5).result.content[0].text),
+    byId.get(5).result.content[0].text.slice(0, 200));
+  check('and the deck tool says the health score is not readiness',
+    /readiness/.test(byId.get(6).result.content[0].text),
+    byId.get(6).result.content[0].text.slice(0, 200));
+  check('pulling a repository is a write, so a read token is refused it',
+    !listed.includes('git.pull') && Boolean(byId.get(7).error) && /read-scoped/.test(byId.get(7).error.message));
   const audited = await db.query('SELECT tool, mode, outcome FROM mcp_audit ORDER BY id');
   check('every MCP call is audited, reads included',
     audited.some((a) => a.tool === 'portfolio.status' && a.outcome === 'ok')
@@ -886,6 +1250,15 @@ async function databaseChecks(db) {
   check('the CLI shows one work package', cliShow.code === 0 && /Weighted domain rollup/.test(cliShow.out),
     cliShow.err);
   check('and names the basis of its progress figure', /basis: hours/.test(cliShow.out));
+  const cliDeck = await run(process.execPath, ['src/cli/tracker.js', 'deck'], asStephen);
+  check('the CLI prints the deck and the mapping', cliDeck.code === 0
+    && /FEATURE\s+pull request\s+implements/.test(cliDeck.out)
+    && /Neither is readiness/.test(cliDeck.out), cliDeck.err || cliDeck.out);
+  const cliLinks = await run(process.execPath, ['src/cli/tracker.js', 'links', 'F-LOAD-012'], asStephen);
+  check('and answers what one repository key maps to',
+    cliLinks.code === 0 && /pull request 978/.test(cliLinks.out) && /implements/.test(cliLinks.out),
+    cliLinks.err || cliLinks.out);
+
   const cliBad = await run(process.execPath, ['src/cli/tracker.js', 'show', 'nonsense'], asStephen);
   check('the CLI refuses a malformed key', cliBad.code !== 0 && /not a work package key/.test(cliBad.err));
   const cliAmbiguous = await run(process.execPath, ['src/cli/tracker.js', 'report'], { NO_COLOR: '1' });
@@ -1003,6 +1376,9 @@ async function httpChecks({ livingToken }) {
       ['wiki', '/api/wiki?project=1'],
       ['meetings', '/api/meetings?project=1'],
       ['connect', '/api/connect'],
+      ['deck', '/api/deck'],
+      ['deck for one project', '/api/deck?project=1'],
+      ['a work package in the repository', '/api/wp/112/git'],
       ['admin', '/api/admin?tab=workflow'],
       ['drawer', '/api/wp/112'],
     ]) {
@@ -1157,7 +1533,7 @@ async function main() {
 
   const before = await fingerprintRealDatabase();
 
-  pureChecks();
+  await pureChecks();
   await withTestDatabase(databaseChecks);
 
   const after = await fingerprintRealDatabase();

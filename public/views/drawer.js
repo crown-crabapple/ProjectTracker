@@ -34,7 +34,16 @@
 
     let data;
     try {
-      data = await global.api.get(`/api/wp/${id}`, { key: 'drawer' });
+      // Two requests, in parallel, rather than one payload. The repository panel
+      // reads a different set of tables and a different permission, and folding
+      // it into the drawer's own endpoint would make every drawer open wait on
+      // the git mirror to answer.
+      const [wp, git] = await Promise.all([
+        global.api.get(`/api/wp/${id}`, { key: 'drawer' }),
+        global.api.get(`/api/wp/${id}/git`, { key: 'drawer-git' }).catch(() => null),
+      ]);
+      data = wp;
+      data.git = git;
     } catch (e) {
       if (e.superseded) return;
       fill(drawer, h('div.drawer-body', [
@@ -74,6 +83,7 @@
         progress(d),
         editControls(app, d),
         relations(app, d),
+        repository(app, d),
         customValues(d),
         files(app, d),
         shares(app, d),
@@ -248,6 +258,133 @@
         ])))
         : h('div', { style: { color: 'var(--ink-6)', 'font-size': '11.5px' }, text: 'no relations recorded' }),
     ]);
+  }
+
+  /**
+   * What this work package is in the repository.
+   *
+   * Both halves are here because both are actionable: the key the repository
+   * knows it by — which is what makes `F-LOAD-012 maps to PR #978` work at all —
+   * and the objects that key has already found. A type that maps to something
+   * and has no link says so in a sentence; an empty box would equally mean
+   * "never pulled".
+   */
+  function repository(app, d) {
+    const git = d.git;
+    if (!git) {
+      return h('div', [
+        h('div.drawer-section', { text: 'Repository' }),
+        h('div', { style: { color: 'var(--ink-6)', 'font-size': '11.5px' }, text: 'the repository panel could not be read' }),
+      ]);
+    }
+    const live = git.links.filter((l) => !l.removed);
+    const removed = git.links.filter((l) => l.removed);
+    return h('div', [
+      h('div.drawer-section', { text: 'Repository' }),
+      h('dl.field-grid', [
+        h('dt', { text: 'KNOWN AS' }),
+        h('dd', [
+          h('div', { style: { display: 'flex', gap: '6px', 'align-items': 'center', 'flex-wrap': 'wrap' } }, [
+            ...git.mapping.addressable_as.map((k) => key(k)),
+            h('button.btn.small', {
+              onclick: () => setRefKey(app, d, git),
+              text: git.work_package.ref_key ? 'CHANGE KEY' : '+ REPOSITORY KEY',
+            }),
+          ]),
+        ]),
+        h('dt', { text: 'MAPS TO' }),
+        h('dd', {
+          style: { color: 'var(--ink-4)' },
+          text: git.mapping.item_kind === 'none'
+            ? `a ${git.work_package.type} has no forge counterpart, so nothing is expected here`
+            : `${git.mapping.example || `a ${git.mapping.item_kind.replace('_', ' ')}`}`,
+        }),
+      ]),
+      live.length
+        ? h('div.rows', { style: { 'margin-top': '9px' } }, live.map((l) => h('div.row', [
+          h('span.tag.small', { style: { 'min-width': '74px' }, text: l.relation.toUpperCase() }),
+          h('div.grow', [
+            l.url
+              ? h('a', {
+                href: l.url, target: '_blank', rel: 'noreferrer noopener',
+                style: { 'font-size': '11.5px' },
+                text: `${l.kind.replace('_', ' ')} ${l.ref} — ${l.title || '(no title)'}`,
+              })
+              : h('div', { style: { 'font-size': '11.5px' }, text: `${l.kind} ${l.ref}` }),
+            h('div', {
+              style: { 'font-size': '11px', color: 'var(--ink-5)' },
+              // How the link came to exist, always. A regex and a person are
+              // different claims and the row says which one this was.
+              text: `${l.repository} · ${l.state}${l.head_branch ? ` · ${l.head_branch}` : ''} · `
+                + (l.origin === 'manual'
+                  ? `linked by hand${l.by ? ` by ${l.by}` : ''}`
+                  : `matched on ${l.matched_key} in the ${l.matched_in}`)
+                + ` · ${l.when}`,
+            }),
+          ]),
+          h('button.btn.small.danger', {
+            onclick: () => app.act(
+              () => global.api.del(`/api/git-links/${l.id}`), 'Link removed'
+            ).then(() => open(app, d.wp.id)),
+            text: 'UNLINK',
+          }),
+        ])))
+        : h('div', {
+          style: { color: 'var(--ink-6)', 'font-size': '11.5px', 'margin-top': '9px' },
+          text: git.mapping.item_kind === 'none'
+            ? 'nothing linked, and nothing expected'
+            : `no ${git.mapping.item_kind.replace('_', ' ')} carries this key yet`,
+        }),
+      git.revisions.length
+        ? h('div', { style: { 'margin-top': '9px' } }, git.revisions.map((r) => h('div', {
+          style: { 'font-size': '11px', color: 'var(--ink-5)', padding: '2px 0' },
+          text: `${r.identifier} · ${r.message || ''} · ${r.author || 'unknown'} · ${r.when}`,
+        })))
+        : null,
+      removed.length
+        ? h('p.note', {
+          style: { margin: '8px 0 0' },
+          text: `${removed.length} link(s) removed by hand and kept: ${removed
+            .map((l) => `${l.kind.replace('_', ' ')} ${l.ref}`).join(', ')}. `
+            + 'A pull will not re-make them.',
+        })
+        : null,
+      git.repositories.length
+        ? h('button.btn.small', {
+          style: { 'margin-top': '9px' },
+          onclick: () => linkByHand(app, d, git),
+          text: '+ LINK TO A PULL REQUEST OR ISSUE',
+        })
+        : h('p.note', { style: { margin: '8px 0 0' }, text: 'this project has no repository connected' }),
+    ]);
+  }
+
+  function setRefKey(app, d, git) {
+    const value = prompt(
+      'The key this work package is known by in the repository. It is matched in pull request '
+      + 'titles, bodies and branch names — F-LOAD-012, B-UI-7. Empty clears it.',
+      git.work_package.ref_key || ''
+    );
+    if (value === null) return;
+    app.act(
+      () => global.api.post(`/api/wp/${d.wp.id}/ref-key`, { ref_key: value.trim() }),
+      value.trim() ? `Known as ${value.trim().toUpperCase()}` : 'Repository key cleared'
+    ).then(() => open(app, d.wp.id));
+  }
+
+  function linkByHand(app, d, git) {
+    const kind = prompt('What kind — pull_request, issue, milestone or release?', git.mapping.item_kind === 'none'
+      ? 'pull_request' : git.mapping.item_kind);
+    if (!kind) return;
+    const ref = prompt(`Which ${kind.replace('_', ' ')}? Its number, or a release tag.`, '');
+    if (!ref) return;
+    app.act(
+      () => global.api.post(`/api/wp/${d.wp.id}/git-links`, {
+        kind: kind.trim(), ref: ref.trim(),
+        repository_id: git.repositories.length === 1 ? git.repositories[0].id : undefined,
+      }),
+      'Linked'
+    ).then(() => open(app, d.wp.id));
   }
 
   function customValues(d) {

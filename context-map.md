@@ -22,9 +22,11 @@ model.
 ### Data
 - `db/schema.sql` — 85 tables, sectioned by domain, with the derivation for
   every non-obvious column. The base; applied only to an empty schema.
-- `db/migrations/NNNN_*.sql` — changes after that. One today: `0001` adds the
+- `db/migrations/NNNN_*.sql` — changes after that. Two today: `0001` adds the
   `mcp_tools` rows for the write tools, so a database seeded before them still
-  offers them.
+  offers them; `0002` adds the git deck — the mirror, the links, the per-type
+  mapping and `work_packages.ref_key`, the key a repository knows a work package
+  by.
 - `db/migrate.js` — creates the database, applies the base then the migrations,
   records what ran in `schema_migrations`, and leaves **one account that can sign
   in** so the demo portfolio is optional. It only ever adds that account when
@@ -59,6 +61,10 @@ model.
   including the date alert sweep.
 - `src/domain/subject.js` — automatic subject generation.
 - `src/domain/files.js` — content-addressed attachments.
+- `src/domain/gitdeck.js` — **which repository object is which work package**, and
+  the deck's numbers: key extraction, the claim-versus-mention rule, gitdeck's
+  health score, CI, coverage, the digest. **None of it is progress** — read the
+  header before putting any of these figures near a readiness percentage.
 - `src/domain/passwords.js` — scrypt.
 
 ### Transport
@@ -68,15 +74,27 @@ model.
 - `src/http/body.js` — JSON, form and multipart parsing.
 - `src/http/auth.js` — sessions, cookies, share tokens.
 
+### The forge
+- `src/gitdeck/client.js` — the **only outbound HTTP in this app**: GitHub, GitLab
+  and Forgejo over the platform `fetch`, with the token read from
+  `process.env[repository.token_env]` at the moment of the call. Injectable
+  `fetchImpl`, which is how the selftest exercises it without a network.
+- `src/gitdeck/pull.js` — fetch, then mirror and match and write the trail in one
+  transaction, then move statuses *after* the commit through the ordinary
+  mutation. A link a person removed is never re-made.
+
 ### Read and write
 - `src/api/views.js` — bootstrap, My page, and the shared row shape.
 - `src/api/views2.js` — portfolio, project overview, work list, Gantt, activity feed.
 - `src/api/views3.js` — boards, backlogs, roadmap, calendar, planner, activity page.
 - `src/api/views4.js` — wiki, meetings, connections, administration, the drawer.
+- `src/api/views5.js` — the git deck, and what one work package is in the repository.
 - `src/api/mutations.js` — work packages, comments, gates, shares, attachments.
 - `src/api/mutations2.js` — projects, versions, baselines, sprints, boards, wiki,
   meetings, preferences, allocations, administration, MCP tokens, the email
   intake.
+- `src/api/mutations3.js` — repositories, the type mapping, the repository key, and
+  linking a work package to a pull request by hand.
 - `src/api/exports.js` — CSV, XLSX, PDF and iCal, each written by hand with the
   reason stated in the header.
 
@@ -95,12 +113,13 @@ model.
 - `public/lib/md.js` — a markdown renderer that builds nodes, not a string.
 - `public/views/*.js` — one file per screen, matching the API endpoint.
 - `src/cli/tracker.js` — the command line.
-- `src/mcp/server.js` — the MCP server: twelve tools (four read, eight write), a
+- `src/mcp/server.js` — the MCP server: fifteen tools (six read, nine write), a
   scoped token, a full audit. A write runs as the token's issuer and is recorded
   as a machine; it calls `src/api/mutations*.js` rather than writing its own SQL.
 
 ### Checks and records
-- `test/selftest.js` — 200 checks against a throwaway database.
+- `test/selftest.js` — 318 checks against a throwaway database, and never against
+  the network: the forge client is exercised through a stub `fetch`.
 - `docs/decisions/` — the decisions that would otherwise be re-derived.
 - `docs/features.md` — the brief's feature list mapped to code, with the gaps
   named.
@@ -128,3 +147,15 @@ model.
 | slip | `scheduling.compareToBaseline()` — against a stored copy, never recomputed |
 | gates met, next gate | `lifecycle.summarise()` |
 | a drawer's progress bar | `views4.drawer()`, and it names its own basis |
+| a repository health score | `gitdeck.healthScore()` — hygiene, **not** readiness |
+| a CI success rate | `gitdeck.ciSummary()` — completed runs only, null when none |
+| how much work is mapped | `gitdeck.coverage()` — both directions, counted apart |
+
+## The one path that leaves this machine
+
+`#/deck` → `GET /api/deck` → `views5.deck()` → `gitdeck.*` for every number, all
+of it read from the mirror in MariaDB. The network is touched in exactly one
+place: the PULL button (or `pt pull`, or the `git.pull` MCP tool) →
+`POST /api/repositories/:id/pull` → `src/gitdeck/pull.js` →
+`src/gitdeck/client.js` → the forge. Nothing else in the app makes an outbound
+request, and nothing else writes `git_items`.

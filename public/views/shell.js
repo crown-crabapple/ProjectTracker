@@ -37,6 +37,7 @@
     { group: 'Knowledge', items: [
       { route: 'wiki', label: 'Wiki & documents', scoped: true },
       { route: 'meetings', label: 'Meetings', scoped: true },
+      { route: 'deck', label: 'Git deck', scoped: true },
     ] },
     { group: 'Setup', admin: true, items: [
       { route: 'connect', label: 'Repositories & MCP' },
@@ -58,12 +59,13 @@
     activity: 'ACTIVITY & INBOX',
     wiki: 'WIKI & DOCUMENTS',
     meetings: 'MEETINGS',
+    deck: 'GIT DECK',
     connect: 'REPOSITORIES & MCP',
     admin: 'ADMINISTRATION',
   };
 
   const SCOPED = new Set(Object.keys(CRUMBS).filter((r) => (
-    ['overview', 'work', 'gantt', 'boards', 'backlogs', 'calendar', 'wiki', 'meetings'].includes(r)
+    ['overview', 'work', 'gantt', 'boards', 'backlogs', 'calendar', 'wiki', 'meetings', 'deck'].includes(r)
   )));
 
   const HEALTH = {

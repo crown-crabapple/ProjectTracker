@@ -207,6 +207,14 @@ async function connect(ctx) {
       id: r.id, scm: r.scm, name: r.name, url: r.url, state: r.state, detail: r.detail,
       default_branch: r.default_branch, project_code: r.project_code,
       revisions: Number(r.revisions), last_synced_at: r.last_synced_at,
+      // Whether this one can actually be fetched, and whether it ever has been.
+      // The connections page is where somebody asks "is this connected", and
+      // 'connected' on a row nothing has ever pulled answers a different
+      // question. The deck at #/deck is where the contents are.
+      pullable: ['github', 'gitlab', 'forgejo'].includes(r.scm),
+      pull_state: r.pull_state,
+      pull_detail: r.pull_detail,
+      last_synced: r.last_synced_at ? ago(r.last_synced_at) : 'never pulled',
       credential: r.token_env ? `read from $${r.token_env}` : 'no credential needed',
       credential_present: r.token_env ? Boolean(process.env[r.token_env]) : null,
     })),

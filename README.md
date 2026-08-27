@@ -72,7 +72,7 @@ has the argument.
 | **Task management & issue tracking** — filterable lists, assignee / accountable / watcher, automatic subject generation, real-time notifications, sharing outside a project, file management, email-to-task, attribute highlighting, export | `#/work`, the drawer · `src/domain/subject.js`, `work_package_shares`, `attachments`, `email_intake`, `src/api/exports.js` |
 | **Agile, Kanban & Scrum** — status / version / subproject / work-breakdown / sprint boards, backlogs, sprints shared across projects (SAFe), story points, several active sprints | `#/boards`, `#/backlogs` · `boards`, `sprints`, `sprint_projects` |
 | **Team collaboration** — activity feeds, collaborative document editing, meetings with agendas and minutes, news, @mentions, internal comments, wiki, forums, XWiki link | `#/activity`, `#/wiki`, `#/meetings` · `documents`, `document_presence`, `meetings`, `news`, `forums`, `comments.internal` |
-| **Roadmap & release planning** — version progress, one product timeline, Git and Subversion repositories, GitHub and GitLab integrations | `#/roadmap`, `#/connect` · `versions`, `repositories`, `integrations` |
+| **Roadmap & release planning** — version progress, one product timeline, Git and Subversion repositories, GitHub, GitLab and Forgejo pulled into a git deck with the work mapped both ways | `#/roadmap`, `#/deck`, `#/connect` · `versions`, `repositories`, `git_items`, `work_package_git_links`, `src/gitdeck/` |
 | **Workflows & customisation** — automated project initiation, status workflows, custom actions, custom themes, form configuration, attribute help texts, unlimited custom fields, fine-grained roles / permissions / groups, placeholder users | `#/admin` · `status_transitions`, `automations`, `themes`, `form_configurations`, `custom_fields`, `roles`, `users.kind = 'placeholder'` |
 | **Other** — MCP server for AI assistants, responsive design | `src/mcp/server.js`, `public/app.css` |
 
@@ -92,6 +92,7 @@ node db/migrate.js --no-login   # apply migrations and create no login
 node db/seed.js                 # reference data + demo portfolio
 node db/seed.js --reference     # reference data only — safe on a live database
 node db/import-state.js FILE    # import a SeedFall tracker state file (--dry-run first)
+node src/cli/tracker.js pull    # fetch a repository and re-match its keys (--dry-run first)
 npm start                     # the web server
 npm test                      # the selftest, against a throwaway database
 node src/cli/tracker.js help  # the command line
@@ -101,6 +102,67 @@ node src/mcp/server.js        # the MCP server, on stdio
 `schema.sql` is the base and is applied only to an empty schema. Once a database
 exists, changes arrive as numbered files in `db/migrations/` — editing
 `schema.sql` to change a live table is the mistake that split makes impossible.
+
+## The git deck
+
+`#/deck` is [gitdeck](https://github.com/debba/gitdeck)'s dashboard — a repository
+grid with a health score, cross-repository pull requests and issues, CI health, a
+security summary and a daily digest — ported into this app's shape, plus the
+thing a tracker needs that a dashboard does not: **the mapping**.
+
+Each of the six work package types declares what it *is* in a repository:
+
+| Type | Maps to | As | Key |
+|---|---|---|---|
+| PHASE | milestone | tracks | `PH-` |
+| EPIC | issue | tracks | `E-` |
+| FEATURE | **pull request** | implements | `F-` |
+| TASK | issue | implements | `T-` |
+| BUG | issue | fixes | `B-` |
+| MILESTONE | release | releases | `M-` |
+
+So `F-LOAD-012` maps to pull request #978. A work package is addressable by its
+own key (`WP-124`, generated from the id) **and** by the key its repository knows
+it as (`work_packages.ref_key` — `F-LOAD-012`), which is what a branch name, a
+pull request title or a commit message actually carries. A pull reads titles,
+bodies and branch names, matches both forms, and records on every link the key
+that matched and where it was found.
+
+```bash
+node src/cli/tracker.js deck                 # repositories, health, CI, how much is mapped
+node src/cli/tracker.js pull --dry-run       # fetch and match, write nothing
+node src/cli/tracker.js pull seedfall/seedfall
+node src/cli/tracker.js links F-LOAD-012     # what one work package is in the repository
+node src/cli/tracker.js key WP-112 F-UI-007  # the key the repository knows it by
+```
+
+Six properties are worth knowing before switching it on:
+
+- **No credential is stored.** A repository records the *name* of an environment
+  variable; the token is read from `process.env` at the moment of the call. A
+  database dump carries no secret, and the deck reports whether the variable is
+  set. This is also why there is no OAuth device flow: it exists to obtain and
+  store a token, and there is nowhere here to store one.
+- **A pull mirrors, it does not decide.** Out of the box it changes no work
+  package's status. A repository can be configured so that a merge moves one, and
+  even then the move goes through the same status workflow the web app uses and
+  is refused if the workflow refuses it.
+- **A link a person removes is never re-made.** The row is kept, and the puller
+  holds that pair back for ever. An integration that overturns a decision every
+  quarter of an hour is one nobody leaves on.
+- **A key in a title or a branch is a claim; a key in a body is a mention** until
+  a closing verb claims it. `blocked on WP-112` and `closes WP-112` are opposite
+  sentences.
+- **A key that matches nothing is kept and listed**, with how many times it was
+  seen. A branch named for work the tracker has never heard of is the most useful
+  thing a pull can tell you.
+- **A health score is not readiness.** Neither is a CI success rate. They are
+  repository hygiene and pipeline health, they never enter the portfolio's
+  percentages, and every surface that shows them says so.
+
+There is **no scheduler and no webhook receiver**: a pull happens when somebody
+presses PULL, runs `pt pull`, or calls the `git.pull` MCP tool. Put the CLI in
+cron if you want it hourly. `docs/decisions/0008` has the argument for all of it.
 
 ## The command line
 
@@ -128,7 +190,7 @@ ambient superuser, so the CLI cannot do something the web app would refuse.
 
 ## The MCP server
 
-stdio, JSON-RPC 2.0, twelve tools — four that read and eight that write.
+stdio, JSON-RPC 2.0, fifteen tools — six that read and nine that write.
 `docs/mcp.md` has the client configuration.
 
 Five properties, each of which is the answer to a question somebody will ask:
@@ -157,8 +219,9 @@ The SeedFall tracker keeps its state as one JSON document: a feature ledger, a
 decision log, the answers to the questions it asked, and a rolling activity
 trail. Its status vocabulary is this app's, so a feature imports as itself.
 
-Features become work packages, questions become comments on the feature they
-name, decisions become one wiki page each with their state as the page's status,
+Features become work packages — carrying the feature id as their **repository
+key**, so a branch called `feature/f-load-012-decisions` finds one after the
+import — questions become comments on the feature they name, decisions become one wiki page each with their state as the page's status,
 and the trail imports with its original timestamps and its original actor labels
 — `claude` and `browser` are not accounts here, and stay labels.
 

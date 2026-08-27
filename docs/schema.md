@@ -1,7 +1,8 @@
 # The schema
 
-85 tables in `db/schema.sql`, sectioned by domain, with the derivation for every
-non-obvious column written next to it. This is the map, not a repeat of the DDL.
+85 tables in `db/schema.sql` plus five added by migration `0002`, sectioned by
+domain, with the derivation for every non-obvious column written next to it. This
+is the map, not a repeat of the DDL.
 
 ## Conventions
 
@@ -36,7 +37,15 @@ These are the ones worth knowing before changing anything.
 | `projects.health` | Recorded, not derived. `docs/decisions/0003`. |
 | `baselines` / `baseline_entries` | A copy, deliberately. A baseline derived from history would move whenever history was corrected, and then a slip could be edited away instead of accepted. |
 | `sprints.sharing = 'system'` + `sprint_projects` | The SAFe case. An explicit membership table rather than a column, so a shared sprint's points can count in every project drawing on it and once in velocity. |
-| `repositories.token_env`, `integrations.token_env` | The **name** of the environment variable, never the value. A credential is not in this database and so cannot be in a dump. |
+| `repositories.token_env`, `integrations.token_env` | The **name** of the environment variable, never the value. A credential is not in this database and so cannot be in a dump. The API refuses a value shaped like a token, and refuses a name that is not upper case — which is what makes a pasted `ghp_…` fail. |
+| `work_packages.ref_key` | The key the *repository* knows this work package by — `F-LOAD-012`. `wp_key` is generated from the id and cannot be chosen, so this is where a project's own convention lives. Unique per project, because two projects legitimately both have an F-LOAD-012. |
+| `work_package_types.git_item_kind` / `git_relation` / `git_key_prefix` | What each of the six types *is* in a repository: a FEATURE is a pull request it implements, a BUG is an issue it fixes. Data rather than code, so changing it is an administration action; `git_type_rules` overrides it per repository. |
+| `git_items` | The living forge objects — pull requests, issues, milestones, releases, branches, CI runs, alerts. Commits are **not** here: they are immutable and already have `repository_revisions`, and mirroring something whose state moves into a table of final rows makes "when did this change" unanswerable. |
+| `git_items.state` | The forge's own word (`open`, `draft`, `merged`, `failure`). Mapping it into this tracker's status vocabulary here would be the second progress model this codebase exists to avoid. |
+| `work_package_git_links.origin` / `matched_key` / `matched_in` | How the link came to exist and the literal text that produced it. A link a regex made and a link a person made are different claims, and the UI never paints them the same. |
+| `work_package_git_links.removed_at` + `removed_by` | A removed link keeps its row, and a pull will never re-make that pair. Overturning a person's decision every quarter of an hour is how an integration gets switched off. |
+| `git_type_rules.merged_status_id` / `closed_status_id` | Both NULL by default, which is the decision: a pull mirrors, it does not decide. When set, the move goes through `status_transitions` like any other and is refused if the workflow refuses it. |
+| `git_unmatched_keys` | A key found in a repository that matches no work package, kept with a count. A branch named for work the tracker has never heard of is the most useful thing a pull reports. |
 | `mcp_tokens.token_hash` + `token_hint` | sha256 and the last four characters. The secret is shown once at creation. |
 | `mcp_audit` | Every call, reads included. `docs/decisions/0005`. |
 | `mcp_tokens.created_by` | Who issued it, and — for a write-scoped token — whose permissions its writes run with. A token can do no more than its issuer, and one with nobody here may read and may not write. `docs/decisions/0006`. |
@@ -60,6 +69,7 @@ These are the ones worth knowing before changing anything.
 | collaboration | `comments`, `mentions`, `documents`, `document_versions`, `document_presence`, `meetings`, `meeting_participants`, `meeting_agenda_items`, `meeting_minutes`, `meeting_outcomes`, `news`, `forums`, `forum_topics`, `forum_messages`, `attachments` |
 | sharing & notification | `work_package_shares`, `notifications`, `activities`, `email_intake`, `calendar_subscriptions` |
 | repositories | `repositories`, `repository_revisions`, `revision_work_packages`, `integrations` |
+| the git deck (`0002`) | `git_items`, `work_package_git_links`, `git_type_rules`, `git_unmatched_keys`, `git_pulls` |
 | workflow & customisation | `custom_fields`, `custom_field_projects`, `custom_field_types`, `custom_values`, `form_configurations`, `form_sections`, `form_fields`, `attribute_help_texts`, `automations`, `automation_projects`, `automation_runs`, `project_initiation_requests`, `settings` |
 | MCP | `mcp_tools`, `mcp_tokens`, `mcp_audit`, `generated_summaries`, `exports` |
 | migrations | `schema_migrations` (created by `db/migrate.js`, not by `schema.sql`) |

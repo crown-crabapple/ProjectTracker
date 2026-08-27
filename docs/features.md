@@ -10,7 +10,9 @@ Three words are used precisely:
 - **Partial** — the mechanism is real and the stated part is missing. The gap is
   named, not implied.
 - **Modelled** — the data model, the API and the screen exist; the outbound
-  network half does not. Nothing in this repository polls GitHub.
+  network half does not. One outbound client now exists — the git deck fetches
+  GitHub, GitLab and Forgejo — and it is the only one; XWiki, IMAP, plain git and
+  SVN are still modelled and say so.
 
 ---
 
@@ -92,8 +94,11 @@ Three words are used precisely:
 |---|---|---|
 | Roadmap / version progress | `#/roadmap`, `versions` | **Done.** An unscheduled version has no marker — drawing it at the far right would read as "scheduled for later", and later and undecided are different answers. |
 | Product timeline | `#/roadmap` | **Done.** Every version in the portfolio on one timeline, bounded to include today. |
-| SVN / Git repositories | `repositories`, `repository_revisions`, `revision_work_packages` | **Modelled.** Revisions and their work package links are stored, shown and seeded. Nothing shells out to `git` or `svn`. |
-| GitHub and GitLab integrations | `integrations`, `repositories.scm` | **Modelled.** Rows, state and detail are shown, and each records the *name* of the environment variable its token is read from — the connections page reports whether that variable is set. There is no API client and no webhook receiver. |
+| SVN / Git repositories | `repositories`, `repository_revisions`, `revision_work_packages` | **Partial.** A GitHub, GitLab or Forgejo repository is fetched over its API and its commits land in `repository_revisions` with their work package links. A plain `git` or `svn` row is still **modelled**: nothing shells out to either, and the deck says `NO API CLIENT FOR THIS SCM` rather than showing an empty panel. |
+| GitHub, GitLab and Forgejo integrations | `src/gitdeck/client.js`, `src/gitdeck/pull.js`, `#/deck` | **Done.** Pull requests, issues, milestones, releases, branches, CI runs and Dependabot alerts are fetched, mirrored into `git_items` and matched to work packages. Ported from [gitdeck](https://github.com/debba/gitdeck); `docs/decisions/0008`. No credential is stored — a repository records the *name* of the environment variable its token is read from, and the deck reports whether that variable is set. **There is no webhook receiver and no scheduler:** a pull happens when somebody presses PULL, runs `pt pull`, or calls the MCP tool. |
+| Work mapped to the repository, both ways | `work_packages.ref_key`, `work_package_git_links`, `git_type_rules`, `git_unmatched_keys` | **Done.** Each of the six types declares what it is in a repository — a FEATURE is a pull request, a BUG is an issue it fixes — and a work package is addressable both by `WP-124` and by the key the repository knows it as (`F-LOAD-012`). Every link records the key that matched and where it was found. A key that matches nothing is kept and listed. A link a person removes is never re-made by a pull. |
+| A merge closing the work it implements | `git_type_rules.merged_status_id`, `closed_status_id` | **Partial, on purpose.** Off by default: a pull mirrors and changes no status until a repository is configured to. When it is, the move goes through `status_transitions` like any other and is refused if the workflow refuses it, and the trail records the machine. There is no UI for the rule — it is a row, like the other configuration in the group below. |
+| Repository health, CI and a daily digest | `src/domain/gitdeck.js`, `#/deck` | **Done.** gitdeck's health score kept number for number, a CI success rate over completed runs only, and the digest as counts. **None of them is progress:** they are never folded into readiness, and the screen, the CLI and the MCP tool say so. Gitdeck's optional OpenAI narrative is not here — see `docs/decisions/0008`. |
 
 ## Workflows & customisation
 
@@ -113,7 +118,7 @@ Three words are used precisely:
 
 | Item | Where | State |
 |---|---|---|
-| MCP server for AI assistants | `src/mcp/server.js`, `docs/mcp.md` | **Done.** Twelve tools — four read, eight write — a scoped token, and an audit that records reads as well as writes. A write runs as the person who issued the token, can do no more than they can, and calls the same mutation functions the web app calls; the activity trail records the machine rather than them. See `docs/decisions/0005` and `0006`. |
+| MCP server for AI assistants | `src/mcp/server.js`, `docs/mcp.md` | **Done.** Fifteen tools — six read, nine write — a scoped token, and an audit that records reads as well as writes. A write runs as the person who issued the token, can do no more than they can, and calls the same mutation functions the web app calls; the activity trail records the machine rather than them. See `docs/decisions/0005` and `0006`. |
 | An assistant creating work | `src/mcp/server.js`, `src/api/mutations2.js` | **Done.** A project (with its template blueprint), a work package, a version, a wiki page and a comment are all creatable over MCP, and a work package is changeable through the status workflow. **Partial in the web app:** versions and wiki pages have no create form there — `createVersion` and `createDocument` exist and are reached by the MCP server and by insert, not by a route. |
 | Responsive design | `public/app.css` | **Done.** Three breakpoints chosen from what actually breaks: 1100px (two-column dashboards), 860px (the rail becomes a drawer), 560px (the eleven-column work table becomes a card list). Verified at 390px with no horizontal overflow. There is also a print stylesheet, because a build plan goes into a meeting on paper. |
 
@@ -124,11 +129,13 @@ Three words are used precisely:
 Everything in the brief has a data model, an API and a screen. What is missing is
 in two groups:
 
-1. **Outbound network work.** Nothing here polls GitHub, GitLab, a git remote, an
-   SVN server, XWiki or an IMAP mailbox. The tables, the display and the inbound
-   endpoints are real; the fetchers are not written. Each connection records the
-   environment variable its credential comes from, so adding a fetcher does not
-   need a schema change.
+1. **Outbound network work, except the forges.** The git deck fetches GitHub,
+   GitLab and Forgejo — that client is written, tested against a stub and
+   reachable from the screen, the CLI and MCP. Nothing polls a plain git remote,
+   an SVN server, XWiki or an IMAP mailbox, and nothing polls the forges either:
+   a pull is something a person or a cron starts, because there is no scheduler
+   here. Each remaining connection records the environment variable its
+   credential comes from, so adding a fetcher does not need a schema change.
 
 2. **Editors for configuration that is currently edited as data.** Themes,
    automations, form layouts, saved views, meetings, news and forum posts are

@@ -401,9 +401,86 @@ const CUSTOM_FIELDS = [
   ['Placeholder for', 'text', 'user', null, 'Who this placeholder will become', 0, null],
 ];
 
+// ------------------------------------------------------------------ the deck
+//
+// A repository as it looks after one pull, so the git deck has something to be
+// read against without anybody's token. Nothing here was fetched — it is the
+// design canvas's repository written out as rows — and the pull that recorded
+// it is seeded as a real `git_pulls` row saying how many items it saw.
+//
+// The keys are the SeedFall convention this tracker inherited: F-LOAD-012 is a
+// FEATURE in the LOAD area, and it is what PR #978 says in its title. One key,
+// F-LOAD-207, deliberately matches nothing — a branch named for work the tracker
+// has never heard of is the most useful thing a pull reports, and a demo that
+// only showed the happy case would hide the panel that says so.
+
+// [work package number, ref_key]
+const REF_KEYS = [
+  [102, 'F-LOAD-011'],
+  [103, 'F-LOAD-012'],
+  [111, 'F-UI-004'],
+  [112, 'F-UI-007'],
+  [121, 'F-UI-021'],
+  [130, 'M-V1-001'],
+];
+
+// [kind, ref, title, state, author, head_branch, base_branch, body, labels,
+//  opened days ago, updated days ago, closed days ago | null, merged days ago | null,
+//  conclusion | null, severity | null]
+const GIT_ITEMS = [
+  ['pull_request', '978', 'F-LOAD-012 parse decision blocks from the markdown ingest', 'merged',
+    'stephen', 'feature/f-load-012-decisions', 'main',
+    'Implements F-LOAD-012. Follows on from F-LOAD-011.', 'ingest', 6, 2, 2, 2, null, null],
+  ['pull_request', '981', 'Weighted rollup for the KPI strip (F-UI-007)', 'open',
+    'modell', 'feature/f-ui-007-rollup', 'main',
+    'Draft. Blocked on the decision in WP-130.', 'ui, needs-review', 3, 1, null, null, null, null],
+  ['pull_request', '984', 'Chore: bump the fixture set', 'open',
+    'rkessler', 'chore/fixtures', 'main', 'No tracker key on purpose — this is housekeeping.',
+    'chore', 2, 1, null, null, null, null],
+  ['issue', '214', 'Ingest drops a decision block that has no heading', 'open',
+    'jlin', null, null, 'Reported against F-LOAD-012. Fixes B-ENG-003.', 'bug', 5, 1, null, null, null, null],
+  ['issue', '219', 'Front-matter validation rejects a valid date', 'closed',
+    'modell', null, null, 'Closed by the fix in F-LOAD-011.', 'bug', 9, 4, 4, null, null, null],
+  ['milestone', '4', 'V1 — the tracker reads the spec', 'open', null, null, null,
+    'PH-2 build phase.', null, 30, 1, null, null, null, null],
+  ['release', 'v0.9.0', 'v0.9.0 — ingest and rollup', 'published', 'stephen', null, null,
+    'First tagged build. Releases M-V1-001.', null, 8, 8, null, null, null, null],
+  ['branch', 'feature/f-load-207-glossary', 'feature/f-load-207-glossary', 'open', null,
+    'feature/f-load-207-glossary', null, null, null, null, 1, null, null, null, null],
+  ['workflow_run', '55120', 'checks', 'completed', 'stephen', 'main', null, null, null,
+    2, 2, null, null, 'success', null],
+  ['workflow_run', '55121', 'checks', 'completed', 'modell', 'feature/f-ui-007-rollup', null, null, null,
+    1, 1, null, null, 'failure', null],
+  ['workflow_run', '55122', 'checks', 'in_progress', 'modell', 'feature/f-ui-007-rollup', null, null, null,
+    0, 0, null, null, null, null],
+  ['security_alert', '3', 'Prototype pollution in a transitive dependency', 'open', null, null, null,
+    null, null, 12, 3, null, null, null, 'moderate'],
+];
+
+// [work package number, item kind, item ref, relation, origin, matched key, matched in]
+//
+// These are what the matcher in src/domain/gitdeck.js produces from the titles,
+// bodies and branch names above. Seeded rather than derived so that the demo
+// database is the same on every machine, and checked by the selftest against the
+// matcher itself so the two cannot drift.
+const GIT_LINKS = [
+  [103, 'pull_request', '978', 'implements', 'key', 'F-LOAD-012', 'title'],
+  [102, 'pull_request', '978', 'mentions', 'key', 'F-LOAD-011', 'body'],
+  [112, 'pull_request', '981', 'implements', 'key', 'F-UI-007', 'title'],
+  [130, 'pull_request', '981', 'mentions', 'key', 'WP-130', 'body'],
+  [103, 'issue', '214', 'mentions', 'key', 'F-LOAD-012', 'body'],
+  [102, 'issue', '219', 'mentions', 'key', 'F-LOAD-011', 'body'],
+  [130, 'release', 'v0.9.0', 'releases', 'key', 'M-V1-001', 'body'],
+  // The CI runs on the branch named for F-UI-007. A run is not a pull request,
+  // so a FEATURE is only mentioned by it — which is the distinction the whole
+  // relation column exists to keep.
+  [112, 'workflow_run', '55121', 'mentions', 'branch', 'F-UI-007', 'branch'],
+  [112, 'workflow_run', '55122', 'mentions', 'branch', 'F-UI-007', 'branch'],
+];
+
 module.exports = {
   TODAY, PEOPLE, MCP_ACTOR, PROGRAMS, PHASES, GATES, PROJECTS, TEMPLATES, VERSIONS, SPRINTS,
   WPS, BASELINE_OFFSETS, WEEK_STARTS, LOAD, ACTIVITY, NOTIFICATIONS, MEETINGS, DOCS,
-  INTEGRATIONS, MCP_TOOLS, AUTOMATIONS, CUSTOM_FIELDS,
+  INTEGRATIONS, MCP_TOOLS, AUTOMATIONS, CUSTOM_FIELDS, REF_KEYS, GIT_ITEMS, GIT_LINKS,
 };
 
